@@ -1,0 +1,378 @@
+/* Main layout - updated for 3-panel design */
+body {
+    font-family: Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #f5f5f5;
+    height: 100vh;
+}
+
+#main-container {
+    display: flex;
+    height: 100vh;
+    max-height: 100vh;
+}
+
+/* Feed panel styles - common for both QDRANT and PostgreSQL */
+.feed-panel {
+    flex: 1;
+    background-color: #f9f9f9;
+    border-right: 1px solid #ddd;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    max-height: 100vh;
+    overflow: hidden;
+}
+
+.feed-panel h2 {
+    margin-top: 0;
+    color: #333;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 0.5rem;
+}
+
+/* Qdrant specific styling */
+#qdrant-feed {
+    border-right: 1px solid #ddd;
+    background-color: #f8f8ff; /* Slight blue tint to distinguish */
+}
+
+#qdrant-feed h2 {
+    color: #4051b5; /* Bluish theme for Qdrant */
+}
+
+/* PostgreSQL specific styling */
+#postgres-feed {
+    border-right: 1px solid #ddd;
+    background-color: #f8fff8; /* Slight green tint to distinguish */
+}
+
+#postgres-feed h2 {
+    color: #1976d2; /* Different blue for PostgreSQL */
+}
+
+/* Common log container styles */
+.log-container {
+    flex: 1;
+    overflow-y: auto;
+    padding-right: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.log-message {
+    background-color: white;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    margin-bottom: 0.8rem;
+    padding: 0.8rem;
+    transition: all 0.2s ease;
+}
+
+.log-message:hover {
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+}
+
+/* Different colored borders for different record types */
+.qdrant-record {
+    border-left: 4px solid #4051b5; /* Bluish */
+}
+
+.relationship-record {
+    border-left: 4px solid #00897b; /* Teal */
+}
+
+.message-chain-record {
+    border-left: 4px solid #7cb342; /* Green */
+}
+
+.user-log {
+    border-left: 4px solid #4285f4;
+}
+
+.ollama-log {
+    border-left: 4px solid #34a853;
+}
+
+.log-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+    font-size: 0.9rem;
+    color: #666;
+}
+
+.log-header strong {
+    color: #333;
+}
+
+.log-time {
+    color: #999;
+    font-size: 0.8rem;
+}
+
+.log-body {
+    line-height: 1.4;
+    margin-bottom: 0.5rem;
+    word-break: break-word;
+}
+
+.log-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    color: #777;
+}
+
+.log-meta span {
+    background-color: #f0f0f0;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+}
+
+.log-status.jammed {
+    background-color: #ffebee;
+    color: #d32f2f;
+}
+
+.log-status.clear {
+    background-color: #e8f5e9;
+    color: #388e3c;
+}
+
+/* Enhanced loading indicator */
+.loading {
+    padding: 0.5rem;
+    text-align: center;
+    color: #777;
+    font-size: 0.9rem;
+    transition: all 0.3s ease;
+}
+
+.loading-active {
+    color: #4285f4;
+    font-weight: bold;
+}
+
+.error {
+    color: #d32f2f;
+    animation: none;
+}
+
+/* Chat container styles */
+#chat-container {
+    flex: 1.5;
+    display: flex;
+    flex-direction: column;
+    padding: 1rem;
+    max-height: 100vh;
+    overflow: hidden;
+}
+
+#chat-container h2 {
+    margin-top: 0;
+    color: #333;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 0.5rem;
+}
+
+#chat-chat-container {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: inset 0 0 5px rgba(0, 0, 0, 0.1);
+    margin-bottom: 1rem;
+}
+
+.user-message, .bot-message {
+    max-width: 80%;
+    margin-bottom: 1rem;
+    padding: 0.8rem 1rem;
+    border-radius: 18px;
+    line-height: 1.4;
+    position: relative;
+    word-break: break-word;
+}
+
+.user-message {
+    background-color: #e3f2fd;
+    color: #0d47a1;
+    margin-left: auto;
+    border-bottom-right-radius: 4px;
+}
+
+.bot-message {
+    background-color: #f5f5f5;
+    color: #333;
+    margin-right: auto;
+    border-bottom-left-radius: 4px;
+}
+
+/* Status indicators for messages */
+.status-indicator {
+    margin-right: 8px;
+    font-weight: bold;
+    display: inline-block;
+    width: 1em;
+    text-align: center;
+}
+
+.message-success {
+    border-left: 4px solid #34a853;
+}
+
+.message-info {
+    border-left: 4px solid #4285f4;
+}
+
+.message-success .status-indicator {
+    color: #34a853;
+}
+
+.message-error {
+    border-left: 4px solid #d32f2f;
+}
+
+.message-error .status-indicator {
+    color: #d32f2f;
+}
+
+/* Enhanced loading states */
+.bot-message.loading {
+    background-color: #f5f5f5;
+    color: #666;
+    font-style: italic;
+    border-left: 4px solid #fbbc05;
+}
+
+.bot-message.loading:after {
+    content: '...';
+    display: inline-block;
+    width: 1em;
+    text-align: left;
+    animation: dots 1.5s steps(5, end) infinite;
+}
+
+@keyframes dots {
+    0%, 20% { content: '.'; }
+    40% { content: '..'; }
+    60% { content: '...'; }
+    80%, 100% { content: ''; }
+}
+
+/* Pulse animation for loading states */
+@keyframes pulse {
+    0% { opacity: 0.6; }
+    50% { opacity: 1; }
+    100% { opacity: 0.6; }
+}
+
+.loading-pulse {
+    animation: pulse 1.5s infinite;
+}
+
+/* Form styles */
+#message-form {
+    display: flex;
+    gap: 0.5rem;
+}
+
+#message-input {
+    flex: 1;
+    padding: 0.8rem 1rem;
+    border: 1px solid #ddd;
+    border-radius: 24px;
+    font-size: 1rem;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+#message-input:focus {
+    border-color: #4285f4;
+    box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.2);
+}
+
+#message-form button {
+    background-color: #4285f4;
+    color: white;
+    border: none;
+    border-radius: 24px;
+    padding: 0.8rem 1.5rem;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+#message-form button:hover {
+    background-color: #3367d6;
+}
+
+.live-data-container {
+    margin-top: 10px;
+    padding: 8px;
+    background-color: #f8f9fa;
+    border-radius: 4px;
+    font-size: 0.9em;
+}
+
+.live-agent-data {
+    margin: 4px 0;
+    padding: 4px;
+    border-bottom: 1px solid #eee;
+}
+
+.live-agent-data:last-child {
+    border-bottom: none;
+}
+
+/* JSON formatting styles */
+.json-key {
+    color: #7c4dff;
+}
+
+.json-value {
+    color: #0277bd;
+}
+
+.json-string {
+    color: #689f38;
+}
+
+.json-number {
+    color: #f57c00;
+}
+
+.json-boolean {
+    color: #d32f2f;
+}
+
+.json-null {
+    color: #757575;
+    font-style: italic;
+}
+
+.collapsed-payload {
+    cursor: pointer;
+    color: #1976d2;
+    text-decoration: underline;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1200px) {
+    #main-container {
+        flex-direction: column;
+    }
+    
+    .feed-panel, #chat-container {
+        height: 33vh;
+        max-height: 33vh;
+    }
+    
+    .feed-panel {
+        border-right: none;
+        border-bottom: 1px solid #ddd;
+    }
+}

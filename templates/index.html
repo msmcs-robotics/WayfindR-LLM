@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hybrid RAG Chat System</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div id="main-container">
+        <!-- Left side: Qdrant Feed -->
+        <div id="qdrant-feed" class="feed-panel">
+            <h2>QDRANT Feed</h2>
+            <div id="qdrant-container" class="log-container"></div>
+            <div id="qdrant-loading" class="loading"></div>
+        </div>
+
+        <!-- Middle: PostgreSQL Feed -->
+        <div id="postgres-feed" class="feed-panel">
+            <h2>PostgreSQL Feed</h2>
+            <div id="postgres-container" class="log-container"></div>
+            <div id="postgres-loading" class="loading"></div>
+        </div>
+
+        <!-- Right side: Chat Container -->
+        <div id="chat-container">
+            <h2>Agent Chat</h2>
+            <div id="chat-chat-container"></div>
+            <form id="message-form">
+                <input type="text" id="message-input" placeholder="Type your message..." required>
+                <button type="submit">Send</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/js/script.js"></script>
+</body>
+</html>
