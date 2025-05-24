@@ -1,23 +1,47 @@
-from fastapi import FastAPI, Request, Response
+# mcp_chatapp.py - Updated with proper hybrid storage and MCP integration
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastmcp import FastMCP
 import uvicorn
 import re
 import json
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
 import sys
 import httpx
-from rag_store import add_mcp_message, init_stores, retrieve_telemetry
+import asyncio
+import logging
+from typing import Dict, List, Optional, Any
+from pydantic import BaseModel
+
+from rag_store import (
+    add_mcp_message, 
+    init_stores, 
+    retrieve_slam_telemetry,
+    get_recent_chat_messages,
+    add_navigation_command,
+    update_command_status,
+    get_navigation_commands,
+    get_slam_maps,
+    get_robot_telemetry_summary,
+    health_check as storage_health_check,
+    add_slam_telemetry
+)
 from llm_config import get_ollama_client, get_model_name
 from qdrant_client import QdrantClient
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Initialize stores on startup
+logger.info("Initializing hybrid storage system...")
 init_stores()
+logger.info("✅ Hybrid storage system initialized")
 
 # Database configuration
 DB_CONFIG = {
@@ -31,19 +55,21 @@ DB_CONFIG = {
 # Qdrant configuration
 QDRANT_HOST = "localhost"
 QDRANT_PORT = 6333
-QDRANT_COLLECTION = "telemetry_data"
+QDRANT_COLLECTION = "slam_telemetry"
 
+# Initialize clients
 ollama_client = get_ollama_client()
 LLM_MODEL = get_model_name()
+qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
 
 # Simulation API endpoint
 SIMULATION_API_URL = "http://127.0.0.1:5001"
 
-# Create an MCP server
-app = FastAPI()
-mcp = FastMCP("Agent Movement and Simulation", app=app)
+# Create FastAPI app and MCP server
+app = FastAPI(title="SLAM Navigation MCP Chat System", version="2.0.0")
+mcp = FastMCP("SLAM Navigation Agent Controller", app=app)
 
-# Add CORS middleware to allow requests from all origins
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # In production, specify exact origins
@@ -56,617 +82,547 @@ app.add_middleware(
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Database functions from chatapp - Updated to work with new schema
-def fetch_logs_from_db(limit=None):
-    try:
-        with psycopg2.connect(**DB_CONFIG) as conn:
-            with conn.cursor() as cur:
-                # Query the mcp_message_chains table instead of logs
-                query = "SELECT id, message_chain, created_at FROM mcp_message_chains"
-                if limit:
-                    query += f" ORDER BY created_at DESC LIMIT {limit}"
-                else:
-                    query += " ORDER BY created_at DESC"
-                cur.execute(query)
-                rows = cur.fetchall()
-                
-                logs = []
-                for row in rows:
-                    log_id, message_data, created_at = row
-                    
-                    # Extract text from message_chain based on its structure
-                    if isinstance(message_data, dict):
-                        # If message_data is a dictionary
-                        content = message_data.get("message", message_data.get("command", ""))
-                    else:
-                        # If it's something else, convert to string
-                        content = str(message_data)
-                    
-                    logs.append({
-                        "log_id": str(log_id),
-                        "text": content,
-                        "metadata": message_data,
-                        "created_at": created_at.isoformat()
-                    })
-                return logs
-    except Exception as e:
-        print(f"Error fetching logs from DB: {e}")
-        traceback.print_exc()
-        return []
+# ─── PYDANTIC MODELS ─────────────────────────────────────────
+class ChatMessage(BaseModel):
+    message: str
+    robot_id: Optional[str] = None
+    session_id: Optional[str] = "default"
+    message_type: Optional[str] = "user_query"
 
-# New endpoints for frontend log viewing
-@app.get("/qdrant_logs")
-async def get_qdrant_logs():
-    """API endpoint to fetch Qdrant logs"""
-    try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-        records = client.scroll(
-            collection_name=QDRANT_COLLECTION,
-            limit=100,
-            with_payload=True,
-            with_vectors=False
-        )[0]
-        
-        # Convert Qdrant records to JSON-serializable format
-        serializable_records = []
-        for record in records:
-            serializable_records.append({
-                "id": record.id,
-                "payload": record.payload
-            })
-        
-        return {"records": serializable_records}
-    except Exception as e:
-        print(f"Error fetching Qdrant logs: {e}")
-        traceback.print_exc()
-        return {"error": str(e)}
+class NavigationRequest(BaseModel):
+    robot_id: str
+    action: str
+    parameters: Dict[str, Any]
 
-@app.get("/postgres_logs")
-async def get_postgres_logs():
-    """API endpoint to fetch PostgreSQL logs"""
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        relationships = []
-        message_chains = []
-        
-        try:
-            with conn.cursor() as cur:
-                # Agent Relationships
-                cur.execute("SELECT * FROM agent_relationships ORDER BY created_at DESC LIMIT 50;")
-                relationships = [list(row) for row in cur.fetchall()]  # Convert tuples to lists for JSON serialization
-                
-                # Convert any JSON/JSONB fields to Python dicts
-                for i, row in enumerate(relationships):
-                    # Assuming index 2 is the JSONB field
-                    if isinstance(row[2], psycopg2.extras.Json):
-                        relationships[i][2] = dict(row[2])
-                
-                # MCP Message Chains
-                cur.execute("SELECT * FROM mcp_message_chains ORDER BY created_at DESC LIMIT 50;")
-                message_chains = [list(row) for row in cur.fetchall()]
-                
-                # Convert any JSON/JSONB fields to Python dicts
-                for i, row in enumerate(message_chains):
-                    # Assuming index 1 is the JSONB field
-                    if isinstance(row[1], psycopg2.extras.Json):
-                        message_chains[i][1] = dict(row[1])
-        finally:
-            conn.close()
-        
-        return {
-            "relationships": relationships,
-            "message_chains": message_chains
-        }
-    except Exception as e:
-        print(f"Error fetching PostgreSQL logs: {e}")
-        traceback.print_exc()
-        return {"error": str(e)}
+class TelemetryQuery(BaseModel):
+    query: str
+    robot_id: Optional[str] = None
+    limit: int = 10
 
-# Define the command to handle agent movement - Updated to use API calls
+# ─── MCP TOOL DEFINITIONS ────────────────────────────────────
 @mcp.tool()
-async def move_agent(agent: str, x: float, y: float) -> dict:
-    """Move an agent to specific coordinates"""
-    print(f"[ACTION] Move agent '{agent}' to ({x}, {y})")
+async def navigate_robot(robot_id: str, x: float, y: float, waypoint_name: str = None) -> dict:
+    """Navigate a robot to specific coordinates with optional waypoint name"""
+    logger.info(f"🎯 [MCP ACTION] Navigate robot '{robot_id}' to ({x}, {y}) waypoint: {waypoint_name}")
     
-    # Call the simulation API to move the agent
-    async with httpx.AsyncClient() as client:
+    # Store navigation command in PostgreSQL
+    command_data = {
+        "action": "navigate",
+        "target_x": x,
+        "target_y": y,
+        "waypoint_name": waypoint_name,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    command_id = add_navigation_command(robot_id, "navigate", command_data)
+    
+    # Call the simulation API to navigate the robot
+    async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             response = await client.post(
-                f"{SIMULATION_API_URL}/move_agent",
-                json={"agent": agent, "x": x, "y": y}
+                f"{SIMULATION_API_URL}/mcp/navigate",
+                params={"robot_id": robot_id, "destination": waypoint_name or f"({x}, {y})"}
             )
             
             if response.status_code == 200:
                 result = response.json()
                 
-                # Log the movement action using the new RAG function
-                timestamp = datetime.now().isoformat()
+                # Update command status to completed
+                update_command_status(command_id, "completed", result)
                 
-                # Create a structured message object for the new RAG system
-                add_mcp_message({
-                    "agent_id": agent,
-                    "position": f"({x}, {y})",
-                    "timestamp": timestamp,
+                # Store MCP action in PostgreSQL
+                mcp_message = {
                     "source": "mcp",
-                    "action": "move",
-                    "jammed": result.get("jammed", False)
-                })
-                
-                # Format the response message
-                if result.get("jammed", False):
-                    message = (f"Agent {agent} is currently jammed (Comm quality: {result.get('communication_quality', 0.2)}). "
-                             f"It will first return to its last safe position at {result.get('current_position')} "
-                             f"before proceeding to ({x}, {y}).")
-                else:
-                    message = f"Moving {agent} to coordinates ({x}, {y})."
+                    "action": "navigate_robot",
+                    "robot_id": robot_id,
+                    "command_id": command_id,
+                    "parameters": command_data,
+                    "result": result,
+                    "timestamp": datetime.now().isoformat()
+                }
+                add_mcp_message(mcp_message)
                 
                 return {
-                    "success": True,
-                    "message": message,
-                    "x": x,
-                    "y": y,
-                    "jammed": result.get("jammed", False),
-                    "communication_quality": result.get("communication_quality", 1.0),
-                    "current_position": result.get("current_position")
+                    "status": "success",
+                    "message": f"Robot {robot_id} navigating to {waypoint_name or f'({x}, {y})'}",
+                    "command_id": command_id,
+                    "robot_response": result
                 }
             else:
-                error_msg = f"Error moving agent: {response.text}"
-                print(f"[API ERROR] {error_msg}")
+                # Update command status to failed
+                error_data = {"error": f"HTTP {response.status_code}", "response": response.text}
+                update_command_status(command_id, "failed", error_data)
+                
                 return {
-                    "success": False,
-                    "message": error_msg
+                    "status": "error",
+                    "message": f"Failed to send navigation command: HTTP {response.status_code}",
+                    "command_id": command_id
                 }
+                
         except Exception as e:
-            error_msg = f"Exception occurred while moving agent: {str(e)}"
-            print(f"[EXCEPTION] {error_msg}")
-            return {
-                "success": False,
-                "message": error_msg
-            }
+            logger.error(f"❌ Error in navigate_robot: {e}")
+            update_command_status(command_id, "failed", {"error": str(e)})
+            return {"status": "error", "message": f"Navigation failed: {str(e)}", "command_id": command_id}
 
-# Direct API endpoint for simulation to call
-@app.post("/move_agent_via_ollama")
-async def move_agent_endpoint(request: Request):
-    data = await request.json()
-    agent = data.get("agent")
-    x = float(data.get("x"))
-    y = float(data.get("y"))
+@mcp.tool()
+async def stop_robot(robot_id: str, emergency: bool = False) -> dict:
+    """Stop robot navigation with optional emergency flag"""
+    logger.info(f"🛑 [MCP ACTION] Stop robot '{robot_id}' (emergency: {emergency})")
     
-    result = await move_agent(agent, x, y)
-    return result
-
-# Process natural language commands - Updated to verify agents exist first
-@app.post("/llm_command")
-async def llm_command(request: Request):
-    data = await request.json()
-    command = data.get("message", "")
-
-    print(f"[RECEIVED COMMAND] {command}")
+    # Store stop command
+    command_data = {
+        "action": "stop",
+        "emergency": emergency,
+        "timestamp": datetime.now().isoformat()
+    }
     
-    # Log the user command using the new RAG function
-    timestamp = datetime.now().isoformat()
-    add_mcp_message({
-        "role": "user",
-        "timestamp": timestamp,
-        "agent_id": "user",
-        "source": "command",
-        "command": command
-    })
-
-    # First get the available agents from the simulation
-    available_agents = {}
-    live_agent_data = {}  # Store live data for LLM context
-    try:
-        async with httpx.AsyncClient() as client:
-            # Get both agent list and their current status
-            agents_response = await client.get(f"{SIMULATION_API_URL}/agents")
-            status_response = await client.get(f"{SIMULATION_API_URL}/status")
-            
-            if agents_response.status_code == 200:
-                available_agents = agents_response.json().get("agents", {})
-                print(f"[AVAILABLE AGENTS] {list(available_agents.keys())}")
-            
-            if status_response.status_code == 200:
-                live_agent_data = status_response.json()
-                print(f"[LIVE AGENT DATA] Retrieved for {len(live_agent_data.get('agent_positions', {}))} agents")
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch agent data: {e}")
-        available_agents = {}
-        live_agent_data = {}
-
-    # Format prompt for the LLM with both historical and live data
-    prompt = f"""You are an AI that controls agents in a 2D simulation.
-
-Available agents: {", ".join(available_agents.keys()) if available_agents else "No agents available"}
-
-User command: "{command}"
-
-LIVE AGENT STATUS:
-{format_live_agent_data(live_agent_data)}
-
-If this is a movement command, extract:
-1. The agent name (must match an available agent)
-2. The x coordinate (number)
-3. The y coordinate (number)
-
-Respond ONLY with the agent name and coordinates in this exact format:
-agent_name,x,y
-
-If it's not a movement command, respond with: "Not a movement command"
-"""
-
-    try:
-        # Get LLM response
-        response = ollama_client.chat(model=LLM_MODEL, messages=[
-            {"role": "user", "content": prompt}
-        ])
-        
-        raw_response = response['message']['content'].strip()
-        print(f"[OLLAMA RESPONSE] {raw_response}")
-
-        # Log the assistant's raw response immediately
-        timestamp = datetime.now().isoformat()
-        add_mcp_message({
-            "role": "assistant",
-            "timestamp": timestamp,
-            "agent_id": "ollama",
-            "source": "response",
-            "response": raw_response  # even if empty
-        })
-
-        # Check if response matches our expected movement command format
-        if "," in raw_response and len(raw_response.split(",")) == 3:
-            agent_name, x_str, y_str = raw_response.split(",")
-            agent_name = agent_name.strip()
-            
-            # Validate agent exists
-            if agent_name not in available_agents:
-                return {"response": f"Error: Agent '{agent_name}' not found in simulation"}
-            
-            try:
-                x = float(x_str.strip())
-                y = float(y_str.strip())
-                
-                # Actually execute the movement
-                move_result = await move_agent(agent_name, x, y)
-                
-                if move_result.get("success"):
-                    # Include live data in response
-                    response_data = {
-                        "response": f"Moving {agent_name} to ({x}, {y}). {move_result.get('message', '')}",
-                        "live_data": {
-                            agent_name: live_agent_data.get('agent_positions', {}).get(agent_name)
-                        }
-                    }
-                    return response_data
-                else:
-                    return {"response": f"Failed to move {agent_name}: {move_result.get('message', 'Unknown error')}"}
-            
-            except ValueError:
-                return {"response": f"Invalid coordinates: {x_str}, {y_str}"}
-        
-        # Not a movement command or invalid format
-        return {"response": raw_response if raw_response else "Command not understood"}
-
-    except Exception as e:
-        print(f"[ERROR] {e}")
-        traceback.print_exc()
-        
-        # Log the error using the new RAG function
-        add_mcp_message({
-            "role": "system",
-            "timestamp": datetime.now().isoformat(),
-            "source": "command",
-            "error": str(e)
-        })
-
-        return {
-            "response": f"Error processing command: {e}"
-        }
-
-def format_live_agent_data(live_data):
-    """Format live agent data for LLM prompt"""
-    if not live_data or not live_data.get('agent_positions'):
-        return "No live agent data available"
+    command_id = add_navigation_command(robot_id, "stop", command_data)
     
-    formatted = []
-    for agent_id, data in live_data['agent_positions'].items():
-        status = "JAMMED" if data.get('jammed', False) else "CLEAR"
-        comm_quality = data.get('communication_quality', 0)
-        pos = data.get('position', {})
-        formatted.append(
-            f"{agent_id}: Position ({pos.get('x', '?')}, {pos.get('y', '?')}) - {status} - Comm: {comm_quality:.2f}"
-        )
-    
-    return "\n".join(formatted)
-
-# Chat endpoint from Flask app now in FastAPI - Updated to incorporate simulation status and new RAG
-@app.post("/chat")
-async def chat(request: Request):
-    try:
-        data = await request.json()
-        user_message = data.get('message')
-        if not user_message:
-            return {"error": "No message provided"}
-        
-        # Get ALL logs for RAG context without limit
-        logs = fetch_logs_from_db()
-        print(f"Retrieved {len(logs)} logs for RAG context")
-        
-        # Get current simulation status
-        sim_status = {}
+    async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            async with httpx.AsyncClient() as client:
-                status_response = await client.get(f"{SIMULATION_API_URL}/status")
-                if status_response.status_code == 200:
-                    sim_status = status_response.json()
+            response = await client.post(
+                f"{SIMULATION_API_URL}/mcp/stop",
+                params={"robot_id": robot_id, "emergency": emergency}
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                update_command_status(command_id, "completed", result)
+                
+                # Store MCP action
+                mcp_message = {
+                    "source": "mcp",
+                    "action": "stop_robot",
+                    "robot_id": robot_id,
+                    "command_id": command_id,
+                    "parameters": command_data,
+                    "result": result,
+                    "timestamp": datetime.now().isoformat()
+                }
+                add_mcp_message(mcp_message)
+                
+                return {
+                    "status": "success",
+                    "message": f"Robot {robot_id} stopped {'(emergency)' if emergency else ''}",
+                    "command_id": command_id,
+                    "robot_response": result
+                }
+            else:
+                error_data = {"error": f"HTTP {response.status_code}", "response": response.text}
+                update_command_status(command_id, "failed", error_data)
+                return {"status": "error", "message": "Failed to stop robot", "command_id": command_id}
+                
         except Exception as e:
-            print(f"Error fetching simulation status: {e}")
-            sim_status = {"error": str(e)}
-        
-        # Sort logs by timestamp for consistency
-        logs_sorted = sorted(
-            logs,
-            key=lambda x: x.get("metadata", {}).get("timestamp", x.get("created_at", "")),
-            reverse=True  # Most recent first
-        )
-        
-        # Format context in a structured way
-        simulation_context = []
-        for log in logs_sorted:
-            metadata = log.get("metadata", {})
-            
-            # Handle both old and new metadata formats
-            if isinstance(metadata, dict):
-                agent_id = metadata.get("agent_id", "Unknown")
-                position = metadata.get("position", "Unknown")
-                jammed = "JAMMED" if metadata.get("jammed", False) else "CLEAR"
-                timestamp = metadata.get("timestamp", "Unknown time")
-                
-                # Extract message or command based on source
-                if metadata.get("source") == "command":
-                    text = metadata.get("command", "")
-                elif metadata.get("source") == "chat":
-                    text = metadata.get("message", "")
-                else:
-                    text = log.get("text", "")
-                
-                # Create rich context entries
-                entry = f"LOG: Agent {agent_id} at position {position} is {jammed} at {timestamp}: {text}"
-                simulation_context.append(entry)
-        
-        # Add current simulation status
-        if sim_status:
-            simulation_context.append("\nCURRENT SIMULATION STATUS:")
-            simulation_context.append(f"Running: {sim_status.get('running', 'Unknown')}")
-            simulation_context.append(f"Iteration Count: {sim_status.get('iteration_count', 'Unknown')}")
-            
-            # Add current agent positions
-            agent_positions = sim_status.get('agent_positions', {})
-            if agent_positions:
-                simulation_context.append("Current Agent Positions:")
-                for agent_id, data in agent_positions.items():
-                    jammed_status = "JAMMED" if data.get("jammed", False) else "CLEAR"
-                    comm_quality = data.get("communication_quality", 0)
-                    position = data.get("position", {})
-                    x = position.get("x", 0) if isinstance(position, dict) else 0
-                    y = position.get("y", 0) if isinstance(position, dict) else 0
-                    simulation_context.append(f"  {agent_id}: Position ({x}, {y}) - {jammed_status} - Comm Quality: {comm_quality:.2f}")
-        
-        # Format full context
-        context_text = "\n".join(simulation_context)
-        
-        # Check for duplicate commands (issued within last 10 seconds)
-        for log in logs_sorted[:5]:  # Check most recent 5 logs
-            metadata = log.get("metadata", {})
-            if metadata.get("role") == "user" and metadata.get("source") == "command":
-                recent_time = metadata.get("timestamp")
-                # Get the command from the new metadata structure
-                recent_text = metadata.get("command", "")
-                if recent_time and (datetime.now() - datetime.fromisoformat(recent_time)).total_seconds() < 10:
-                    if recent_text.lower() == user_message.lower():
-                        print(f"Detected duplicate command processing: '{user_message}'")
-                        return {"response": ""}  # Empty response for duplicates
-        
-        # Create a clear system prompt for the LLM
-        system_prompt = """You are an assistant for a Multi-Agent Simulation system. Provide helpful, accurate information about the simulation based on the logs and current status.
+            logger.error(f"❌ Error in stop_robot: {e}")
+            update_command_status(command_id, "failed", {"error": str(e)})
+            return {"status": "error", "message": f"Stop command failed: {str(e)}", "command_id": command_id}
 
-Keep your responses concise and focused on answering the user's questions.
-- If the user is asking about agent positions or statuses, give them the current information
-- Don't recite all the log history unless specifically asked
-- For questions about recent commands, just give a brief status update
-"""
+@mcp.tool()
+async def get_robot_status(robot_id: str = None) -> dict:
+    """Get current status of robots from the simulation system"""
+    logger.info(f"📊 [MCP ACTION] Get robot status for '{robot_id or 'all robots'}'")
+    
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            if robot_id:
+                response = await client.get(f"{SIMULATION_API_URL}/mcp/status", params={"robot_id": robot_id})
+            else:
+                response = await client.get(f"{SIMULATION_API_URL}/mcp/status")
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                # Store MCP action
+                mcp_message = {
+                    "source": "mcp",
+                    "action": "get_robot_status",
+                    "robot_id": robot_id,
+                    "result": result,
+                    "timestamp": datetime.now().isoformat()
+                }
+                add_mcp_message(mcp_message)
+                
+                return {"status": "success", "data": result}
+            else:
+                return {"status": "error", "message": f"Failed to get robot status: HTTP {response.status_code}"}
+                
+        except Exception as e:
+            logger.error(f"❌ Error in get_robot_status: {e}")
+            return {"status": "error", "message": f"Status query failed: {str(e)}"}
+
+@mcp.tool()
+async def get_system_health() -> dict:
+    """Get comprehensive system health including storage and simulation"""
+    logger.info("🏥 [MCP ACTION] Get system health")
+    
+    try:
+        # Get storage health
+        storage_health = storage_health_check()
         
-        # Call the LLM with all information
+        # Get simulation system health
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            try:
+                sim_response = await client.get(f"{SIMULATION_API_URL}/mcp/system_status")
+                if sim_response.status_code == 200:
+                    sim_health = sim_response.json()
+                else:
+                    sim_health = {"status": "error", "message": "Simulation system unreachable"}
+            except:
+                sim_health = {"status": "error", "message": "Simulation system unreachable"}
+        
+        # Combine health data
+        system_health = {
+            "timestamp": datetime.now().isoformat(),
+            "storage_system": storage_health,
+            "simulation_system": sim_health,
+            "overall_status": "healthy" if (
+                storage_health.get("overall_status") == "healthy" and 
+                sim_health.get("status") == "success"
+            ) else "degraded"
+        }
+        
+        # Store health check
+        mcp_message = {
+            "source": "mcp",
+            "action": "get_system_health",
+            "result": system_health,
+            "timestamp": datetime.now().isoformat()
+        }
+        add_mcp_message(mcp_message)
+        
+        return {"status": "success", "data": system_health}
+        
+    except Exception as e:
+        logger.error(f"❌ Error in get_system_health: {e}")
+        return {"status": "error", "message": f"Health check failed: {str(e)}"}
+
+@mcp.tool()
+async def query_telemetry_data(query: str, robot_id: str = None, limit: int = 10) -> dict:
+    """Query SLAM telemetry data using semantic search"""
+    logger.info(f"🔍 [MCP ACTION] Query telemetry: '{query}' for robot '{robot_id or 'all'}'")
+    
+    try:
+        # Retrieve telemetry from Qdrant using semantic search
+        telemetry_results = retrieve_slam_telemetry(query, robot_id, limit)
+        
+        # Store MCP action
+        mcp_message = {
+            "source": "mcp",
+            "action": "query_telemetry_data",
+            "robot_id": robot_id,
+            "query": query,
+            "results_count": len(telemetry_results),
+            "timestamp": datetime.now().isoformat()
+        }
+        add_mcp_message(mcp_message)
+        
+        return {
+            "status": "success",
+            "query": query,
+            "robot_id": robot_id,
+            "results": telemetry_results,
+            "count": len(telemetry_results)
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error in query_telemetry_data: {e}")
+        return {"status": "error", "message": f"Telemetry query failed: {str(e)}"}
+
+@mcp.tool()
+async def get_robot_history(robot_id: str, limit: int = 20) -> dict:
+    """Get navigation history for a specific robot"""
+    logger.info(f"📜 [MCP ACTION] Get history for robot '{robot_id}'")
+    
+    try:
+        # Get position history from simulation
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{SIMULATION_API_URL}/mcp/history/{robot_id}", params={"limit": limit})
+            
+            if response.status_code == 200:
+                history_data = response.json()
+                
+                # Get command history from PostgreSQL
+                command_history = get_navigation_commands(robot_id, limit=limit)
+                
+                result = {
+                    "robot_id": robot_id,
+                    "position_history": history_data.get("history", []),
+                    "command_history": command_history,
+                    "telemetry_summary": get_robot_telemetry_summary(robot_id, hours=24)
+                }
+                
+                # Store MCP action
+                mcp_message = {
+                    "source": "mcp",
+                    "action": "get_robot_history",
+                    "robot_id": robot_id,
+                    "result_summary": {
+                        "position_records": len(result["position_history"]),
+                        "command_records": len(result["command_history"])
+                    },
+                    "timestamp": datetime.now().isoformat()
+                }
+                add_mcp_message(mcp_message)
+                
+                return {"status": "success", "data": result}
+            else:
+                return {"status": "error", "message": "Failed to get robot history"}
+                
+    except Exception as e:
+        logger.error(f"❌ Error in get_robot_history: {e}")
+        return {"status": "error", "message": f"History query failed: {str(e)}"}
+
+@mcp.tool()
+async def emergency_stop_all() -> dict:
+    """Emergency stop all connected robots"""
+    logger.info("🚨 [MCP ACTION] Emergency stop all robots")
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(f"{SIMULATION_API_URL}/mcp/emergency_stop")
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                # Store emergency action
+                mcp_message = {
+                    "source": "mcp",
+                    "action": "emergency_stop_all",
+                    "result": result,
+                    "timestamp": datetime.now().isoformat(),
+                    "priority": "emergency"
+                }
+                add_mcp_message(mcp_message)
+                
+                return {"status": "success", "message": "Emergency stop issued to all robots", "data": result}
+            else:
+                return {"status": "error", "message": "Failed to issue emergency stop"}
+                
+    except Exception as e:
+        logger.error(f"❌ Error in emergency_stop_all: {e}")
+        return {"status": "error", "message": f"Emergency stop failed: {str(e)}"}
+
+# ─── CHAT PROCESSING ─────────────────────────────────────────
+async def process_chat_message(message: str, robot_id: str = None, session_id: str = "default") -> dict:
+    """Process chat message with LLM and MCP integration"""
+    try:
+        # Store user message in PostgreSQL
+        user_message = {
+            "role": "user",
+            "message": message,
+            "robot_id": robot_id,
+            "session_id": session_id,
+            "timestamp": datetime.now().isoformat()
+        }
+        add_mcp_message(user_message)
+        
+        # Get recent context from PostgreSQL
+        recent_messages = get_recent_chat_messages(robot_id=robot_id, limit=10)
+        
+        # Build context for LLM
+        context = "You are an AI assistant controlling a SLAM navigation robot system. "
+        context += "You have access to MCP tools for robot control and telemetry queries. "
+        context += "Use the available tools to help users navigate robots, check status, and analyze telemetry data.\n\n"
+        
+        # Add recent chat context
+        if recent_messages:
+            context += "Recent conversation context:\n"
+            for msg in recent_messages[-5:]:  # Last 5 messages
+                msg_data = msg.get("message_chain", {})
+                if msg_data.get("role") == "user":
+                    context += f"User: {msg_data.get('message', '')}\n"
+                elif msg_data.get("role") == "assistant":
+                    context += f"Assistant: {msg_data.get('message', '')}\n"
+            context += "\n"
+        
+        # Add robot context if specified
+        if robot_id:
+            context += f"Current robot context: {robot_id}\n"
+            # Get recent telemetry for this robot
+            telemetry_results = retrieve_slam_telemetry(
+                f"recent status for {robot_id}", robot_id=robot_id, limit=3
+            )
+            if telemetry_results:
+                context += "Recent telemetry data:\n"
+                for result in telemetry_results:
+                    payload = result.get("payload", {})
+                    context += f"- Position: ({payload.get('position_x', 0):.1f}, {payload.get('position_y', 0):.1f}), "
+                    context += f"Status: {payload.get('status', 'unknown')}, "
+                    context += f"Battery: {payload.get('battery_level', 0):.1f}%\n"
+                context += "\n"
+        
+        # Current user message
+        full_prompt = context + f"User: {message}\n\nAssistant:"
+        
+        # Get LLM response
         response = ollama_client.chat(
             model=LLM_MODEL,
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"SIMULATION LOGS AND STATUS:\n{context_text}\n\nUSER QUERY: {user_message}\n\nAnswer based only on information provided above."}
+                {"role": "system", "content": context},
+                {"role": "user", "content": message}
             ]
         )
         
-        # Debug response
-        print("\n===== LLM RESPONSE =====")
-        print(f"Model: {LLM_MODEL}")
-        print("Content:", end=" ")
-        if 'message' in response and response['message']:
-            print(response['message']['content'])
-        else:
-            print("NO CONTENT")
-        print("========================\n")
+        assistant_response = response["message"]["content"]
         
-        # Extract response safely
-        ollama_response = ""
-        if 'message' in response and response['message']:
-            if 'content' in response['message'] and response['message']['content']:
-                ollama_response = response['message']['content']
-        
-        # Ensure we got some response
-        if not ollama_response.strip():
-            ollama_response = "I'm unable to provide an answer based on the available logs and simulation status."
-        
-        # Log interaction with the new RAG system
-        timestamp = datetime.now().isoformat()
-        
-        # Log user message
-        add_mcp_message({
-            "role": "user",
-            "timestamp": timestamp,
-            "agent_id": "user",
-            "source": "chat",
-            "message": user_message
-        })
-
-        # Log assistant response
-        add_mcp_message({
+        # Store assistant response in PostgreSQL
+        assistant_message = {
             "role": "assistant",
-            "timestamp": timestamp,
-            "agent_id": "ollama",
-            "source": "chat",
-            "message": ollama_response
-        })
-        
-        return {"response": ollama_response}
-    except Exception as e:
-        print(f"ERROR in chat route: {e}")
-        traceback.print_exc()
-        return {"error": str(e), "error_type": type(e).__name__}
-
-# Added new endpoint to get simulation parameters
-@app.get("/simulation_info")
-async def get_simulation_info():
-    """Get information about the simulation configuration"""
-    try:
-        async with httpx.AsyncClient() as client:
-            params_response = await client.get(f"{SIMULATION_API_URL}/simulation_params")
-            agents_response = await client.get(f"{SIMULATION_API_URL}/agents")
-            
-            if params_response.status_code == 200 and agents_response.status_code == 200:
-                params = params_response.json()
-                agents = agents_response.json()
-                
-                return {
-                    "simulation_params": params,
-                    "agents": agents.get("agents", {})
-                }
-            else:
-                return {
-                    "error": "Failed to fetch simulation information",
-                    "params_status": params_response.status_code,
-                    "agents_status": agents_response.status_code
-                }
-    except Exception as e:
-        print(f"Error fetching simulation info: {e}")
-        return {"error": str(e)}
-
-# Added control endpoints to start/pause/continue simulation
-@app.post("/control/pause")
-async def pause_simulation():
-    """Pause the simulation via API"""
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(f"{SIMULATION_API_URL}/control/pause")
-            return response.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/control/continue")
-async def continue_simulation():
-    """Continue the simulation via API"""
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(f"{SIMULATION_API_URL}/control/continue")
-            return response.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-# LOG endpoints - Updated to work with the new schema
-@app.get("/logs")
-async def get_logs():
-    try:
-        logs = fetch_logs_from_db(limit=100)
-        
-        # Format logs for frontend compatibility
-        formatted_logs = []
-        for log in logs:
-            metadata = log.get("metadata", {})
-            
-            # Handle both message and command based on source
-            text = ""
-            if isinstance(metadata, dict):
-                if metadata.get("source") == "command":
-                    text = metadata.get("command", "")
-                elif metadata.get("source") == "chat":
-                    text = metadata.get("message", "")
-                elif "action" in metadata:
-                    text = f"Action: {metadata.get('action')} for {metadata.get('agent_id')}"
-                else:
-                    # Fallback if there's no specific text field
-                    text = log.get("text", "")
-            
-            formatted_logs.append({
-                "log_id": log.get("log_id"),
-                "text": text,
-                "metadata": metadata,
-                "created_at": log.get("created_at")
-            })
+            "message": assistant_response,
+            "robot_id": robot_id,
+            "session_id": session_id,
+            "timestamp": datetime.now().isoformat(),
+            "model_used": LLM_MODEL
+        }
+        add_mcp_message(assistant_message)
         
         return {
-            "logs": formatted_logs,
-            "has_more": False  # You could paginate in future
+            "status": "success",
+            "response": assistant_response,
+            "context_used": len(recent_messages),
+            "robot_id": robot_id
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing chat message: {e}")
+        return {"status": "error", "message": f"Chat processing failed: {str(e)}"}
+
+# ─── WEB INTERFACE ROUTES ────────────────────────────────────
+@app.get("/", response_class=HTMLResponse)
+async def chat_interface(request: Request):
+    """Main chat interface"""
+    return templates.TemplateResponse("chat.html", {"request": request})
+
+@app.post("/chat")
+async def chat_endpoint(chat_msg: ChatMessage):
+    """Chat endpoint for processing messages"""
+    try:
+        result = await process_chat_message(
+            message=chat_msg.message,
+            robot_id=chat_msg.robot_id,
+            session_id=chat_msg.session_id
+        )
+        return JSONResponse(content=result)
+    except Exception as e:
+        logger.error(f"❌ Chat endpoint error: {e}")
+        return JSONResponse(
+            content={"status": "error", "message": str(e)},
+            status_code=500
+        )
+
+@app.get("/api/robots")
+async def api_get_robots():
+    """Get list of available robots"""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{SIMULATION_API_URL}/robots")
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"robots": [], "error": "Simulation system unavailable"}
+    except Exception as e:
+        return {"robots": [], "error": str(e)}
+
+@app.get("/api/telemetry")
+async def api_query_telemetry(query: TelemetryQuery):
+    """Query telemetry data via REST API"""
+    try:
+        results = retrieve_slam_telemetry(query.query, query.robot_id, query.limit)
+        return {"status": "success", "results": results, "count": len(results)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/health")
+async def api_health_check():
+    """API health check endpoint"""
+    try:
+        health_result = await get_system_health()
+        return health_result
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/chat/history")
+async def api_chat_history(robot_id: str = None, limit: int = 50):
+    """Get chat history"""
+    try:
+        messages = get_recent_chat_messages(robot_id=robot_id, limit=limit)
+        return {"status": "success", "messages": messages, "count": len(messages)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ─── TELEMETRY INJECTION ENDPOINT ────────────────────────────
+@app.post("/api/telemetry/inject")
+async def inject_telemetry_data(request: Request):
+    """Endpoint for injecting telemetry data directly into Qdrant (for testing/debugging)"""
+    try:
+        telemetry_data = await request.json()
+        robot_id = telemetry_data.get("robot_id", "test_robot")
+        
+        # Store in Qdrant using the hybrid storage system
+        telemetry_id = add_slam_telemetry(robot_id, telemetry_data)
+        
+        return {
+            "status": "success", 
+            "message": f"Telemetry stored with ID: {telemetry_id}",
+            "telemetry_id": telemetry_id
         }
     except Exception as e:
-        print(f"Error in /logs route: {e}")
-        traceback.print_exc()
-        return {"error": f"Internal server error: {str(e)}"}
+        logger.error(f"❌ Error injecting telemetry: {e}")
+        return {"status": "error", "message": str(e)}
 
-@app.get("/log_count")
-async def log_count():
-    """
-    Return the current number of logs in the system.
-    """
-    try:
-        logs = fetch_logs_from_db()
-        return {"log_count": len(logs)}
-    except Exception as e:
-        print("Error in /log_count route:", e)
-        return {"error": "Internal server error"}
-
-# Root endpoint to serve the HTML with Jinja2
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    try:
-        return templates.TemplateResponse("index.html", {"request": request})
-    except Exception as e:
-        error_msg = f"ERROR: Could not render template 'index.html': {e}"
-        print(error_msg)
-        return HTMLResponse(content=f"<html><body>{error_msg}</body></html>", status_code=500)
-
-@app.get("/test")
-async def test():
-    return {"message": "FastAPI server is running correctly!"}
-
-# Health check endpoint that also verifies simulation API connectivity
-@app.get("/health")
-async def health_check():
-    """Check if the server and simulation API are reachable"""
-    try:
-        # Check if simulation API is reachable
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{SIMULATION_API_URL}/")
-            simulation_status = "online" if response.status_code == 200 else "offline"
-    except Exception as e:
-        simulation_status = f"unreachable: {str(e)}"
+# ─── STARTUP AND CONFIGURATION ───────────────────────────────
+@app.on_event("startup")
+async def startup_event():
+    """Initialize system on startup"""
+    logger.info("🚀 Starting SLAM Navigation MCP Chat System")
+    logger.info(f"📊 Qdrant: {QDRANT_HOST}:{QDRANT_PORT}")
+    logger.info(f"🗄️  PostgreSQL: {DB_CONFIG['host']}:{DB_CONFIG['port']}")
+    logger.info(f"🤖 LLM Model: {LLM_MODEL}")
+    logger.info(f"🎮 Simulation API: {SIMULATION_API_URL}")
     
-    return {
-        "mcp_server": "online",
-        "simulation_api": simulation_status,
-        "timestamp": datetime.now().isoformat()
-    }
+    # Test connections
+    try:
+        # Test storage health
+        health = storage_health_check()
+        if health["overall_status"] == "healthy":
+            logger.info("✅ Hybrid storage system is healthy")
+        else:
+            logger.warning("⚠️  Storage system has issues")
+            
+        # Test simulation API
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            try:
+                response = await client.get(f"{SIMULATION_API_URL}/health")
+                if response.status_code == 200:
+                    logger.info("✅ Simulation system is reachable")
+                else:
+                    logger.warning("⚠️  Simulation system returned error")
+            except:
+                logger.warning("⚠️  Cannot reach simulation system")
+                
+    except Exception as e:
+        logger.error(f"❌ Startup health check failed: {e}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    logger.info("🛑 Shutting down SLAM Navigation MCP Chat System")
+
+def run_chat_server():
+    """Run the chat server"""
+    uvicorn.run(app, host="0.0.0.0", port=5002, log_level="info")
 
 if __name__ == "__main__":
-    print("Starting integrated MCP server with chat app...")
-    print(f"Python version: {sys.version}")
-    print("Visit http://127.0.0.1:5000")
-    uvicorn.run(app, host="127.0.0.1", port=5000)
+    print("🚀 Starting SLAM Navigation MCP Chat System")
+    print("💬 Chat Interface: http://localhost:5002")
+    print("📚 API Documentation: http://localhost:5002/docs")
+    print("🔧 MCP Tools Available:")
+    print("   - navigate_robot(robot_id, x, y, waypoint_name)")
+    print("   - stop_robot(robot_id, emergency)")
+    print("   - get_robot_status(robot_id)")
+    print("   - query_telemetry_data(query, robot_id, limit)")
+    print("   - get_robot_history(robot_id, limit)")
+    print("   - get_system_health()")
+    print("   - emergency_stop_all()")
+    
+    run_chat_server()
