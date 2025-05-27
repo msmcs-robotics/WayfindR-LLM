@@ -9,9 +9,9 @@ import sys
 from datetime import datetime
 
 # Import our modular components
-from chat_handler import ChatHandler
-from telemetry_handler import TelemetryHandler
-from rag_store import init_stores
+from chat_handler_mcp import ChatHandler
+from telemetry_handler_mcp import TelemetryHandler
+from rag_store import init_stores, get_system_health
 
 # Initialize stores on startup
 init_stores()
@@ -33,9 +33,25 @@ app.add_middleware(
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Initialize handlers
-chat_handler = ChatHandler(mcp)
-telemetry_handler = TelemetryHandler()
+# Initialize handlers with error handling
+try:
+    chat_handler = ChatHandler(mcp)
+    telemetry_handler = TelemetryHandler()
+    print("✅ All handlers initialized successfully")
+except Exception as e:
+    print(f"❌ Handler initialization failed: {e}")
+    # You might want to exit or use fallback handlers
+    raise
+
+# ─── ERROR HANDLING WRAPPER ────────────────────────────
+
+async def handle_endpoint_error(endpoint_func, *args, **kwargs):
+    """Generic error handler for endpoints"""
+    try:
+        return await endpoint_func(*args, **kwargs)
+    except Exception as e:
+        print(f"[ENDPOINT ERROR] {endpoint_func.__name__}: {e}")
+        return {"error": f"Internal server error in {endpoint_func.__name__}", "details": str(e)}
 
 # ─── CORE ENDPOINTS ────────────────────────────────────
 
@@ -51,16 +67,31 @@ async def index(request: Request):
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "online",
-        "timestamp": datetime.now().isoformat(),
-        "components": {
-            "chat_handler": "online",
-            "telemetry_handler": "online",
-            "mcp_server": "online"
+    """Enhanced health check endpoint"""
+    try:
+        system_health = get_system_health()
+        
+        return {
+            "status": "online",
+            "timestamp": datetime.now().isoformat(),
+            "components": {
+                "chat_handler": "online",
+                "telemetry_handler": "online", 
+                "mcp_server": "online"
+            },
+            "system_health": system_health
         }
-    }
+    except Exception as e:
+        return {
+            "status": "partial",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+            "components": {
+                "chat_handler": "unknown",
+                "telemetry_handler": "unknown",
+                "mcp_server": "online"
+            }
+        }
 
 @app.get("/test")
 async def test():
@@ -71,75 +102,75 @@ async def test():
 @app.post("/chat")
 async def chat(request: Request):
     """Main chat endpoint for user interactions"""
-    return await chat_handler.handle_chat(request)
+    return await handle_endpoint_error(chat_handler.handle_chat, request)
 
 @app.post("/llm_command")
 async def llm_command(request: Request):
     """Process natural language commands for robot navigation"""
-    return await chat_handler.handle_llm_command(request)
+    return await handle_endpoint_error(chat_handler.handle_llm_command, request)
 
 @app.post("/robot_message")
 async def robot_message(request: Request):
     """Handle messages from robots requesting assistance"""
-    return await chat_handler.handle_robot_message(request)
+    return await handle_endpoint_error(chat_handler.handle_robot_message, request)
 
 @app.get("/logs")
 async def get_logs():
     """Get chat and command logs"""
-    return await chat_handler.get_logs()
+    return await handle_endpoint_error(chat_handler.get_logs)
 
 @app.get("/log_count")
 async def log_count():
     """Get current log count"""
-    return await chat_handler.get_log_count()
+    return await handle_endpoint_error(chat_handler.get_log_count)
 
 # ─── TELEMETRY ENDPOINTS ───────────────────────────────
 
 @app.post("/telemetry")
 async def receive_telemetry(request: Request):
     """Receive and store robot telemetry data"""
-    return await telemetry_handler.receive_telemetry(request)
+    return await handle_endpoint_error(telemetry_handler.receive_telemetry, request)
 
 @app.get("/telemetry/status")
 async def get_telemetry_status():
     """Get current status of all robots"""
-    return await telemetry_handler.get_telemetry_status()
+    return await handle_endpoint_error(telemetry_handler.get_telemetry_status)
 
 @app.get("/telemetry/robot/{robot_id}")
 async def get_robot_telemetry(robot_id: str, hours: int = 1):
     """Get telemetry history for specific robot"""
-    return await telemetry_handler.get_robot_telemetry(robot_id, hours)
+    return await handle_endpoint_error(telemetry_handler.get_robot_telemetry, robot_id, hours)
 
 @app.get("/qdrant_logs")
 async def get_qdrant_logs():
     """Get Qdrant vector database logs"""
-    return await telemetry_handler.get_qdrant_logs()
+    return await handle_endpoint_error(telemetry_handler.get_qdrant_logs)
 
 @app.get("/postgres_logs")
 async def get_postgres_logs():
     """Get PostgreSQL database logs"""
-    return await telemetry_handler.get_postgres_logs()
+    return await handle_endpoint_error(telemetry_handler.get_postgres_logs)
 
 # ─── NAVIGATION CONTROL ENDPOINTS ──────────────────────
 
 @app.post("/control/pause")
 async def pause_simulation():
     """Pause robot navigation (if using simulation)"""
-    return await chat_handler.pause_simulation()
+    return await handle_endpoint_error(chat_handler.pause_simulation)
 
 @app.post("/control/continue")
 async def continue_simulation():
     """Resume robot navigation (if using simulation)"""
-    return await chat_handler.continue_simulation()
+    return await handle_endpoint_error(chat_handler.continue_simulation)
 
 @app.get("/simulation_info")
 async def get_simulation_info():
     """Get robot and navigation system information"""
-    return await chat_handler.get_simulation_info()
+    return await handle_endpoint_error(chat_handler.get_simulation_info)
 
 # ─── MCP TOOL REGISTRATION ─────────────────────────────
 
-# Register MCP tools through chat handler
+# Register MCP tools through handlers
 @mcp.tool()
 async def navigate(waypoint_name: str) -> dict:
     """Navigate robot to a single waypoint"""

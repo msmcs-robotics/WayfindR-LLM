@@ -3,3 +3,4 @@
 **/inputs/
 **/rag_storage/
 **/venv/
+**__pycache__/
