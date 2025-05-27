@@ -1,3 +1,5 @@
+**Setup python 3.11 virtual environment:**
+
 ```bash
 sudo add-apt-repository ppa:deadsnakes/ppa
 sudo apt update
@@ -7,9 +9,32 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+**Install Docker & Docker Compose:**
+
 ```bash
-docker compose down -v; docker compose up -d; python3 main_mcp.py
+sudo apt install -y docker.io; sudo groupadd docker; sudo usermod -aG docker $USER; sudo systemctl start docker; sudo systemctl enable docker; newgrp docker
+```bash
+
+```bash
+DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}; mkdir -p $DOCKER_CONFIG/cli-plugins; curl -SL https://github.com/docker/compose/releases/download/v2.35.0/docker-compose-linux-x86_64 -o $DOCKER_CONFIG/cli-plugins/docker-compose; chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose; docker compose version
 ```
+
+**Run the docker images and start the app:**
+
+```bash
+docker compose down -v; sudo chown -R $USER:$USER ./pg_data ./qdrant_data; rm -rf ./pg_data ./qdrant_data; docker compose up -d; python3 main_mcp.py
+```
+
+**Remove items not kept in git, except the venv**
+
+```bash
+git clean -xdn -e venv/
+git clean -xdf -e venv/
+```
+
+
+
+some prompts used along the way:
 
 
 basically i want you to condense the attatched code without losing the core functionality:

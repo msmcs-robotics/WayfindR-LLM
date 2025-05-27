@@ -1,4 +1,4 @@
-**/pgdata/
+**/pg_data/
 **/qdrant_data/
 **/inputs/
 **/rag_storage/
