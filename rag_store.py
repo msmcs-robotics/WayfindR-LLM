@@ -1,614 +1,483 @@
-# rag_store.py - Updated for Raspberry Pi SLAM Navigation System
 import os
 import asyncio
 import psycopg2
-from psycopg2.extras import Json, RealDictCursor
+from psycopg2.extras import Json
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import Distance, VectorParams, PointStruct
 from sentence_transformers import SentenceTransformer
 from uuid import uuid4
 import nest_asyncio
 from datetime import datetime, timedelta
 import json
-import logging
-from typing import Dict, List, Optional, Any
 import numpy as np
 
 nest_asyncio.apply()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ─── CONFIGURATION ────────────────────────────────────────────
+# ─── CONFIG ────────────────────────────────────────────
 VECTOR_DIM = 384
 EMBED_MODEL = "all-MiniLM-L6-v2"
-QDRANT_COLLECTION = "slam_telemetry"
-QDRANT_CHAT_COLLECTION = "chat_embeddings"  # Optional for semantic chat search
+QDRANT_COLLECTION = "telemetry_data"
+CHAT_COLLECTION = "chat_context"
 
 DB_CONFIG = {
     "dbname": "rag_db",
-    "user": "postgres", 
+    "user": "postgres",
     "password": "password",
     "host": "localhost",
     "port": "5432"
 }
 
-# Initialize clients
 qdrant_client = QdrantClient(host="localhost", port=6333)
 model = SentenceTransformer(EMBED_MODEL)
 
-# ─── INITIALIZATION ───────────────────────────────────────────
+# ─── INIT QDRANT + POSTGRES ───────────────────────────
 def init_stores():
-    """Initialize both PostgreSQL and Qdrant for hybrid storage"""
+    """Initialize PostgreSQL tables and Qdrant collections"""
+    # Init PostgreSQL tables and extensions
     try:
-        # Initialize PostgreSQL tables
         with psycopg2.connect(**DB_CONFIG) as conn:
             conn.autocommit = True
             with conn.cursor() as cur:
-                # Enable required extensions
                 cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
-                cur.execute("CREATE EXTENSION IF NOT EXISTS btree_gin;")
                 
-                # Chat and MCP message storage (PostgreSQL)
+                # Agent relationships table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS agent_relationships (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        agent_id TEXT NOT NULL,
+                        relationship JSONB,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                
+                # MCP message chains table
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS mcp_message_chains (
                         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                        message_chain JSONB NOT NULL,
-                        message_type VARCHAR(50) NOT NULL DEFAULT 'general',
-                        robot_id VARCHAR(100),
-                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        INDEX gin_message_chain ON mcp_message_chains USING gin(message_chain)
+                        message_chain JSONB,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
                 
-                # Robot state and relationships (PostgreSQL)
+                # Robot telemetry summary table for structured queries
                 cur.execute("""
-                    CREATE TABLE IF NOT EXISTS robot_relationships (
+                    CREATE TABLE IF NOT EXISTS robot_telemetry (
                         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                        robot_id VARCHAR(100) NOT NULL,
-                        relationship_type VARCHAR(50) NOT NULL,
-                        relationship_data JSONB NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        robot_id TEXT NOT NULL,
+                        timestamp TIMESTAMP NOT NULL,
+                        position_x REAL,
+                        position_y REAL,
+                        expected_x REAL,
+                        expected_y REAL,
+                        movement_speed REAL,
+                        distance_traveled REAL,
+                        is_stuck BOOLEAN DEFAULT FALSE,
+                        current_waypoint TEXT,
+                        target_waypoint TEXT,
+                        navigation_status TEXT,
+                        sensor_data JSONB,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
                 
-                # Navigation commands and responses (PostgreSQL)
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS navigation_commands (
-                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                        robot_id VARCHAR(100) NOT NULL,
-                        command_type VARCHAR(50) NOT NULL,
-                        command_data JSONB NOT NULL,
-                        status VARCHAR(50) DEFAULT 'pending',
-                        response_data JSONB,
-                        issued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        completed_at TIMESTAMP,
-                        INDEX idx_robot_commands ON navigation_commands(robot_id, issued_at),
-                        INDEX gin_command_data ON navigation_commands USING gin(command_data)
-                    );
-                """)
+                # Index for efficient queries
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_robot_telemetry_robot_timestamp ON robot_telemetry(robot_id, timestamp DESC);")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_robot_telemetry_stuck ON robot_telemetry(robot_id, is_stuck) WHERE is_stuck = TRUE;")
                 
-                # SLAM map data and waypoints (PostgreSQL) 
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS slam_map_data (
-                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                        robot_id VARCHAR(100) NOT NULL,
-                        map_name VARCHAR(200),
-                        map_data JSONB NOT NULL,
-                        waypoints JSONB,
-                        obstacles JSONB,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """)
-                
-                # Create indexes for better performance
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_mcp_robot_id ON mcp_message_chains(robot_id);")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_mcp_timestamp ON mcp_message_chains(timestamp);")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_mcp_type ON mcp_message_chains(message_type);")
-                
-        logger.info("✅ PostgreSQL tables initialized successfully")
-        
+        print("✅ PostgreSQL ready.")
     except Exception as e:
-        logger.error(f"❌ PostgreSQL initialization failed: {e}")
+        print("❌ PostgreSQL init failed:", e)
         raise
 
-    try:
-        # Initialize Qdrant collections
-        # Main telemetry collection
-        if not qdrant_client.collection_exists(QDRANT_COLLECTION):
+    # Init Qdrant collections
+    collections_to_create = [
+        (QDRANT_COLLECTION, "Robot telemetry and sensor data"),
+        (CHAT_COLLECTION, "Chat messages and context")
+    ]
+    
+    for collection_name, description in collections_to_create:
+        if not qdrant_client.collection_exists(collection_name):
             qdrant_client.recreate_collection(
-                collection_name=QDRANT_COLLECTION,
+                collection_name=collection_name,
                 vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE)
             )
-            logger.info(f"✅ Qdrant collection '{QDRANT_COLLECTION}' created")
-        
-        # Optional chat embeddings collection for semantic search
-        if not qdrant_client.collection_exists(QDRANT_CHAT_COLLECTION):
-            qdrant_client.recreate_collection(
-                collection_name=QDRANT_CHAT_COLLECTION,
-                vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE)
-            )
-            logger.info(f"✅ Qdrant collection '{QDRANT_CHAT_COLLECTION}' created")
-            
-    except Exception as e:
-        logger.error(f"❌ Qdrant initialization failed: {e}")
-        raise
+            print(f"✅ Qdrant collection '{collection_name}' created for {description}.")
 
-# ─── TELEMETRY DATA STORAGE (QDRANT) ─────────────────────────
-def add_slam_telemetry(robot_id: str, telemetry_data: Dict[str, Any]) -> str:
-    """Store SLAM navigation telemetry in Qdrant with vector embeddings"""
-    try:
-        # Create rich text representation for embedding
-        telemetry_text = format_telemetry_for_embedding(robot_id, telemetry_data)
-        
-        # Generate vector embedding
-        vector = model.encode(telemetry_text).tolist()
-        
-        # Prepare metadata for Qdrant
-        metadata = {
-            "robot_id": robot_id,
-            "timestamp": telemetry_data.get("timestamp", datetime.now().isoformat()),
-            "position_x": float(telemetry_data.get("position", {}).get("x", 0)),
-            "position_y": float(telemetry_data.get("position", {}).get("y", 0)),
-            "heading": float(telemetry_data.get("position", {}).get("heading", 0)),
-            "status": telemetry_data.get("status", "unknown"),
-            "battery_level": float(telemetry_data.get("battery_level", 0)),
-            "obstacle_distance": float(telemetry_data.get("obstacle_distance", 0)),
-            "navigation_status": telemetry_data.get("navigation_status", "idle"),
-            "target_waypoint": telemetry_data.get("target_waypoint", ""),
-            "slam_quality": float(telemetry_data.get("slam_quality", 0)),
-            "localization_confidence": float(telemetry_data.get("localization_confidence", 0)),
-            "data_type": "slam_telemetry"
+# ─── ROBOT TELEMETRY FUNCTIONS ─────────────────────────
+def add_robot_telemetry(robot_id, telemetry_data):
+    """
+    Add robot telemetry data to both PostgreSQL (structured) and Qdrant (vector search)
+    
+    Expected telemetry_data structure:
+    {
+        "timestamp": "2024-01-01T12:00:00",
+        "position": {"x": 1.5, "y": 2.3},
+        "expected_position": {"x": 1.6, "y": 2.4},
+        "movement_speed": 0.5,
+        "distance_traveled": 0.1,
+        "is_stuck": False,
+        "current_waypoint": "entrance",
+        "target_waypoint": "reception",
+        "navigation_status": "navigating",
+        "sensor_summary": {
+            "obstacles_detected": 2,
+            "closest_obstacle_distance": 1.2,
+            "imu_stable": True,
+            "wheel_encoder_error": 0.05
         }
-        
-        # Add LIDAR data if available
-        if "lidar_data" in telemetry_data:
-            lidar = telemetry_data["lidar_data"]
-            metadata.update({
-                "lidar_min_distance": float(lidar.get("min_distance", 0)),
-                "lidar_max_distance": float(lidar.get("max_distance", 0)),
-                "lidar_avg_distance": float(lidar.get("avg_distance", 0)),
-                "lidar_points_count": int(lidar.get("points_count", 0))
-            })
-        
-        # Add navigation data if available
-        if "navigation" in telemetry_data:
-            nav = telemetry_data["navigation"]
-            metadata.update({
-                "waypoints_remaining": int(nav.get("waypoints_remaining", 0)),
-                "path_length": float(nav.get("path_length", 0)),
-                "eta_seconds": float(nav.get("eta_seconds", 0))
-            })
-            
-        telemetry_id = str(uuid4())
-        
-        # Store in Qdrant
+    }
+    """
+    telemetry_id = str(uuid4())
+    timestamp = datetime.fromisoformat(telemetry_data.get("timestamp", datetime.now().isoformat()))
+    
+    # Extract position data
+    pos = telemetry_data.get("position", {})
+    expected_pos = telemetry_data.get("expected_position", {})
+    
+    # Store structured data in PostgreSQL
+    try:
+        with psycopg2.connect(**DB_CONFIG) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO robot_telemetry (
+                        id, robot_id, timestamp, position_x, position_y, 
+                        expected_x, expected_y, movement_speed, distance_traveled,
+                        is_stuck, current_waypoint, target_waypoint, navigation_status,
+                        sensor_data
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                """, (
+                    telemetry_id, robot_id, timestamp,
+                    pos.get("x"), pos.get("y"),
+                    expected_pos.get("x"), expected_pos.get("y"),
+                    telemetry_data.get("movement_speed"),
+                    telemetry_data.get("distance_traveled"),
+                    telemetry_data.get("is_stuck", False),
+                    telemetry_data.get("current_waypoint"),
+                    telemetry_data.get("target_waypoint"),
+                    telemetry_data.get("navigation_status"),
+                    Json(telemetry_data.get("sensor_summary", {}))
+                ))
+            conn.commit()
+    except Exception as e:
+        print(f"❌ Failed to store telemetry in PostgreSQL: {e}")
+        raise
+    
+    # Create searchable text for vector storage
+    searchable_text = create_telemetry_search_text(robot_id, telemetry_data)
+    
+    # Store in Qdrant for semantic search
+    try:
+        vector = model.encode(searchable_text).tolist()
         qdrant_client.upsert(
             collection_name=QDRANT_COLLECTION,
-            points=[PointStruct(id=telemetry_id, vector=vector, payload=metadata)]
+            points=[PointStruct(
+                id=telemetry_id,
+                vector=vector,
+                payload={
+                    "robot_id": robot_id,
+                    "timestamp": timestamp.isoformat(),
+                    "type": "telemetry",
+                    "searchable_text": searchable_text,
+                    **telemetry_data
+                }
+            )]
         )
-        
-        logger.info(f"📊 SLAM telemetry stored for {robot_id}: {telemetry_id}")
-        return telemetry_id
-        
     except Exception as e:
-        logger.error(f"❌ Failed to store SLAM telemetry: {e}")
+        print(f"❌ Failed to store telemetry in Qdrant: {e}")
         raise
-
-def format_telemetry_for_embedding(robot_id: str, data: Dict[str, Any]) -> str:
-    """Format telemetry data into rich text for vector embedding"""
-    position = data.get("position", {})
     
-    text = f"""SLAM Navigation Telemetry Report
-Robot: {robot_id}
-Timestamp: {data.get('timestamp', 'unknown')}
-Location: ({position.get('x', 0):.2f}, {position.get('y', 0):.2f}) meters, heading {position.get('heading', 0):.1f}°
-Status: {data.get('status', 'unknown')}
-Navigation: {data.get('navigation_status', 'idle')}
-Target: {data.get('target_waypoint', 'none')}
-Battery: {data.get('battery_level', 0):.1f}%
-Nearest obstacle: {data.get('obstacle_distance', 0):.2f}m
-SLAM quality: {data.get('slam_quality', 0):.2f}
-Localization confidence: {data.get('localization_confidence', 0):.2f}"""
+    print(f"✅ Telemetry stored for {robot_id} at {timestamp}")
+    return telemetry_id
 
-    # Add LIDAR summary
-    if "lidar_data" in data:
-        lidar = data["lidar_data"]
-        text += f"""
-LIDAR scan: {lidar.get('points_count', 0)} points, distances {lidar.get('min_distance', 0):.1f}-{lidar.get('max_distance', 0):.1f}m"""
-
-    # Add navigation details
-    if "navigation" in data:
-        nav = data["navigation"]
-        text += f"""
-Navigation: {nav.get('waypoints_remaining', 0)} waypoints remaining, ETA {nav.get('eta_seconds', 0):.0f}s"""
-
-    # Add map information
-    if "map_info" in data:
-        map_info = data["map_info"]
-        text += f"""
-Map: {map_info.get('name', 'unknown')}, explored {map_info.get('exploration_percent', 0):.1f}%"""
-
-    return text
-
-# ─── CHAT MESSAGE STORAGE (POSTGRESQL) ───────────────────────
-def add_mcp_message(message_data: Dict[str, Any]) -> str:
-    """Store MCP chat messages in PostgreSQL"""
-    try:
-        message_id = str(uuid4())
-        
-        # Determine message type
-        message_type = determine_message_type(message_data)
-        robot_id = message_data.get("robot_id") or message_data.get("agent_id")
-        
-        with psycopg2.connect(**DB_CONFIG) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO mcp_message_chains (id, message_chain, message_type, robot_id, timestamp)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (
-                    message_id,
-                    Json(message_data),
-                    message_type,
-                    robot_id,
-                    message_data.get("timestamp", datetime.now().isoformat())
-                ))
-            conn.commit()
-        
-        logger.info(f"💬 MCP message stored: {message_id} (type: {message_type})")
-        return message_id
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to store MCP message: {e}")
-        raise
-
-def determine_message_type(message_data: Dict[str, Any]) -> str:
-    """Determine the type of message for categorization"""
-    source = message_data.get("source", "")
-    role = message_data.get("role", "")
+def create_telemetry_search_text(robot_id, telemetry_data):
+    """Create searchable text representation of telemetry data"""
+    pos = telemetry_data.get("position", {})
+    expected_pos = telemetry_data.get("expected_position", {})
     
-    if "command" in message_data:
-        return "navigation_command"
-    elif role == "user":
-        return "user_query"  
-    elif role == "assistant":
-        return "assistant_response"
-    elif source == "mcp":
-        return "mcp_action"
-    elif "error" in message_data:
-        return "error_log"
-    else:
-        return "general"
+    text_parts = [
+        f"Robot {robot_id}",
+        f"at position ({pos.get('x', 0):.2f}, {pos.get('y', 0):.2f})",
+        f"expected position ({expected_pos.get('x', 0):.2f}, {expected_pos.get('y', 0):.2f})",
+        f"speed {telemetry_data.get('movement_speed', 0):.2f} m/s",
+    ]
+    
+    if telemetry_data.get("is_stuck"):
+        text_parts.append("STUCK and needs assistance")
+    
+    if telemetry_data.get("current_waypoint"):
+        text_parts.append(f"currently at waypoint {telemetry_data['current_waypoint']}")
+    
+    if telemetry_data.get("target_waypoint"):
+        text_parts.append(f"navigating to {telemetry_data['target_waypoint']}")
+    
+    text_parts.append(f"status: {telemetry_data.get('navigation_status', 'unknown')}")
+    
+    # Add sensor summary
+    sensor_summary = telemetry_data.get("sensor_summary", {})
+    if sensor_summary.get("obstacles_detected", 0) > 0:
+        text_parts.append(f"detected {sensor_summary['obstacles_detected']} obstacles")
+        closest_dist = sensor_summary.get("closest_obstacle_distance")
+        if closest_dist:
+            text_parts.append(f"closest obstacle {closest_dist:.2f}m away")
+    
+    return " ".join(text_parts)
 
-# ─── NAVIGATION COMMAND STORAGE ──────────────────────────────
-def add_navigation_command(robot_id: str, command_type: str, command_data: Dict[str, Any]) -> str:
-    """Store navigation commands with status tracking"""
-    try:
-        command_id = str(uuid4())
-        
-        with psycopg2.connect(**DB_CONFIG) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO navigation_commands (id, robot_id, command_type, command_data, status)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (command_id, robot_id, command_type, Json(command_data), "pending"))
-            conn.commit()
-            
-        logger.info(f"🎯 Navigation command stored: {command_id} for {robot_id}")
-        return command_id
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to store navigation command: {e}")
-        raise
-
-def update_command_status(command_id: str, status: str, response_data: Optional[Dict[str, Any]] = None):
-    """Update navigation command status and response"""
+# ─── TELEMETRY RETRIEVAL AND CONTEXT ──────────────────
+def get_recent_telemetry_context(robot_id=None, hours_back=1, max_entries=10):
+    """Get recent telemetry data for RAG context"""
     try:
         with psycopg2.connect(**DB_CONFIG) as conn:
             with conn.cursor() as cur:
-                if response_data:
-                    cur.execute("""
-                        UPDATE navigation_commands 
-                        SET status = %s, response_data = %s, completed_at = %s
-                        WHERE id = %s
-                    """, (status, Json(response_data), datetime.now(), command_id))
-                else:
-                    cur.execute("""
-                        UPDATE navigation_commands 
-                        SET status = %s, completed_at = %s
-                        WHERE id = %s
-                    """, (status, datetime.now(), command_id))
-            conn.commit()
-            
-    except Exception as e:
-        logger.error(f"❌ Failed to update command status: {e}")
-
-# ─── SLAM MAP DATA STORAGE ───────────────────────────────────
-def store_slam_map(robot_id: str, map_name: str, map_data: Dict[str, Any], 
-                   waypoints: Optional[List[Dict]] = None, obstacles: Optional[List[Dict]] = None) -> str:
-    """Store SLAM map data and waypoints"""
-    try:
-        map_id = str(uuid4())
-        
-        with psycopg2.connect(**DB_CONFIG) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO slam_map_data (id, robot_id, map_name, map_data, waypoints, obstacles)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (
-                    map_id, robot_id, map_name, 
-                    Json(map_data), Json(waypoints or []), Json(obstacles or [])
-                ))
-            conn.commit()
-            
-        logger.info(f"🗺️  SLAM map stored: {map_id} for {robot_id}")
-        return map_id
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to store SLAM map: {e}")
-        raise
-
-# ─── RETRIEVAL FUNCTIONS ─────────────────────────────────────
-def retrieve_slam_telemetry(query: str, robot_id: Optional[str] = None, limit: int = 10) -> List[Dict]:
-    """Retrieve SLAM telemetry using vector similarity search"""
-    try:
-        query_vector = model.encode(query).tolist()
-        
-        # Build filter if robot_id specified
-        query_filter = None
-        if robot_id:
-            query_filter = Filter(
-                must=[FieldCondition(key="robot_id", match=MatchValue(value=robot_id))]
-            )
-        
-        results = qdrant_client.search(
-            collection_name=QDRANT_COLLECTION,
-            query_vector=query_vector,
-            limit=limit,
-            query_filter=query_filter
-        )
-        
-        return [{"id": r.id, "score": r.score, "payload": r.payload} for r in results]
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to retrieve SLAM telemetry: {e}")
-        return []
-
-def get_recent_chat_messages(robot_id: Optional[str] = None, message_type: Optional[str] = None, 
-                           limit: int = 50) -> List[Dict]:
-    """Retrieve recent chat messages from PostgreSQL"""
-    try:
-        with psycopg2.connect(**DB_CONFIG) as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                query = "SELECT * FROM mcp_message_chains WHERE 1=1"
-                params = []
+                since_time = datetime.now() - timedelta(hours=hours_back)
                 
                 if robot_id:
-                    query += " AND robot_id = %s"
-                    params.append(robot_id)
-                    
-                if message_type:
-                    query += " AND message_type = %s" 
-                    params.append(message_type)
-                    
-                query += " ORDER BY timestamp DESC LIMIT %s"
-                params.append(limit)
-                
-                cur.execute(query, params)
-                rows = cur.fetchall()
-                
-                return [dict(row) for row in rows]
-                
-    except Exception as e:
-        logger.error(f"❌ Failed to retrieve chat messages: {e}")
-        return []
-
-def get_navigation_commands(robot_id: str, status: Optional[str] = None, limit: int = 20) -> List[Dict]:
-    """Get navigation commands for a robot"""
-    try:
-        with psycopg2.connect(**DB_CONFIG) as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                if status:
                     cur.execute("""
-                        SELECT * FROM navigation_commands 
-                        WHERE robot_id = %s AND status = %s
-                        ORDER BY issued_at DESC LIMIT %s
-                    """, (robot_id, status, limit))
+                        SELECT robot_id, timestamp, position_x, position_y, expected_x, expected_y,
+                               movement_speed, is_stuck, current_waypoint, target_waypoint, 
+                               navigation_status, sensor_data
+                        FROM robot_telemetry 
+                        WHERE robot_id = %s AND timestamp >= %s
+                        ORDER BY timestamp DESC 
+                        LIMIT %s;
+                    """, (robot_id, since_time, max_entries))
                 else:
                     cur.execute("""
-                        SELECT * FROM navigation_commands 
-                        WHERE robot_id = %s
-                        ORDER BY issued_at DESC LIMIT %s
-                    """, (robot_id, limit))
-                    
-                rows = cur.fetchall()
-                return [dict(row) for row in rows]
+                        SELECT robot_id, timestamp, position_x, position_y, expected_x, expected_y,
+                               movement_speed, is_stuck, current_waypoint, target_waypoint, 
+                               navigation_status, sensor_data
+                        FROM robot_telemetry 
+                        WHERE timestamp >= %s
+                        ORDER BY timestamp DESC 
+                        LIMIT %s;
+                    """, (since_time, max_entries))
                 
+                return cur.fetchall()
     except Exception as e:
-        logger.error(f"❌ Failed to retrieve navigation commands: {e}")
+        print(f"❌ Error retrieving telemetry context: {e}")
         return []
 
-def get_slam_maps(robot_id: str) -> List[Dict]:
-    """Get SLAM maps for a robot"""
+def get_stuck_robots():
+    """Get list of robots that are currently stuck"""
     try:
-        with psycopg2.connect(**DB_CONFIG) as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT * FROM slam_map_data 
-                    WHERE robot_id = %s
-                    ORDER BY updated_at DESC
-                """, (robot_id,))
-                
-                rows = cur.fetchall()
-                return [dict(row) for row in rows]
-                
-    except Exception as e:
-        logger.error(f"❌ Failed to retrieve SLAM maps: {e}")
-        return []
-
-# ─── ANALYTICS AND REPORTING ─────────────────────────────────
-def get_robot_telemetry_summary(robot_id: str, hours: int = 24) -> Dict[str, Any]:
-    """Get telemetry summary for a robot over specified time period"""
-    try:
-        since_time = datetime.now() - timedelta(hours=hours)
-        
-        results = qdrant_client.scroll(
-            collection_name=QDRANT_COLLECTION,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(key="robot_id", match=MatchValue(value=robot_id)),
-                    FieldCondition(key="timestamp", range={"gte": since_time.isoformat()})
-                ]
-            ),
-            limit=1000,
-            with_payload=True,
-            with_vectors=False
-        )
-        
-        records = results[0]
-        
-        if not records:
-            return {"robot_id": robot_id, "records": 0, "summary": "No data available"}
-            
-        # Calculate statistics
-        positions = [(r.payload["position_x"], r.payload["position_y"]) for r in records]
-        batteries = [r.payload["battery_level"] for r in records]
-        obstacles = [r.payload["obstacle_distance"] for r in records]
-        
-        # Calculate total distance traveled
-        total_distance = 0
-        for i in range(1, len(positions)):
-            x1, y1 = positions[i-1]
-            x2, y2 = positions[i]
-            total_distance += np.sqrt((x2-x1)**2 + (y2-y1)**2)
-        
-        summary = {
-            "robot_id": robot_id,
-            "time_period_hours": hours,
-            "total_records": len(records),
-            "distance_traveled_m": round(total_distance, 2),
-            "battery_stats": {
-                "current": batteries[-1] if batteries else 0,
-                "min": min(batteries) if batteries else 0,
-                "max": max(batteries) if batteries else 0,
-                "avg": round(sum(batteries)/len(batteries), 1) if batteries else 0
-            },
-            "obstacle_stats": {
-                "min_distance": round(min(obstacles), 2) if obstacles else 0,
-                "avg_distance": round(sum(obstacles)/len(obstacles), 2) if obstacles else 0
-            },
-            "current_position": positions[-1] if positions else (0, 0),
-            "status_distribution": {}
-        }
-        
-        # Status distribution
-        statuses = [r.payload["status"] for r in records]
-        for status in set(statuses):
-            summary["status_distribution"][status] = statuses.count(status)
-            
-        return summary
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to generate telemetry summary: {e}")
-        return {"error": str(e)}
-
-# ─── MAINTENANCE FUNCTIONS ───────────────────────────────────
-def cleanup_old_data(days_to_keep: int = 30):
-    """Clean up old data from both PostgreSQL and Qdrant"""
-    try:
-        cutoff_date = datetime.now() - timedelta(days=days_to_keep)
-        
-        # Clean PostgreSQL
         with psycopg2.connect(**DB_CONFIG) as conn:
             with conn.cursor() as cur:
-                # Clean old messages
+                # Get most recent status for each robot
                 cur.execute("""
-                    DELETE FROM mcp_message_chains 
-                    WHERE created_at < %s
-                """, (cutoff_date,))
+                    WITH latest_status AS (
+                        SELECT DISTINCT ON (robot_id) robot_id, timestamp, is_stuck, 
+                               position_x, position_y, current_waypoint, target_waypoint
+                        FROM robot_telemetry 
+                        ORDER BY robot_id, timestamp DESC
+                    )
+                    SELECT * FROM latest_status WHERE is_stuck = TRUE;
+                """)
                 
-                # Clean old commands
-                cur.execute("""
-                    DELETE FROM navigation_commands 
-                    WHERE issued_at < %s AND status IN ('completed', 'failed')
-                """, (cutoff_date,))
-                
-            conn.commit()
-        
-        # Clean Qdrant (requires scrolling through all points)
-        # This is a simplified approach - in production you might want batch processing
-        old_points = qdrant_client.scroll(
-            collection_name=QDRANT_COLLECTION,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="timestamp", range={"lt": cutoff_date.isoformat()})]
-            ),
-            limit=1000,
-            with_payload=False,
-            with_vectors=False
-        )[0]
-        
-        if old_points:
-            point_ids = [p.id for p in old_points]
-            qdrant_client.delete(
-                collection_name=QDRANT_COLLECTION,
-                points_selector=point_ids
-            )
-            
-        logger.info(f"🧹 Cleaned up data older than {days_to_keep} days")
-        
+                return cur.fetchall()
     except Exception as e:
-        logger.error(f"❌ Failed to cleanup old data: {e}")
+        print(f"❌ Error getting stuck robots: {e}")
+        return []
 
-# ─── HEALTH CHECK ────────────────────────────────────────────
-def health_check() -> Dict[str, Any]:
-    """Check health of both storage systems"""
+def search_telemetry_context(query, k=5):
+    """Search telemetry data using semantic similarity"""
     try:
-        # Test PostgreSQL
-        pg_status = "healthy"
-        pg_message = ""
-        try:
-            with psycopg2.connect(**DB_CONFIG) as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) FROM mcp_message_chains")
-                    message_count = cur.fetchone()[0]
-        except Exception as e:
-            pg_status = "unhealthy"
-            pg_message = str(e)
-            message_count = 0
-            
-        # Test Qdrant
-        qdrant_status = "healthy"
-        qdrant_message = ""
-        telemetry_count = 0
-        try:
-            collection_info = qdrant_client.get_collection(QDRANT_COLLECTION)
-            telemetry_count = collection_info.points_count
-        except Exception as e:
-            qdrant_status = "unhealthy" 
-            qdrant_message = str(e)
-            
-        return {
-            "timestamp": datetime.now().isoformat(),
-            "postgresql": {
-                "status": pg_status,
-                "message": pg_message,
-                "message_count": message_count
-            },
-            "qdrant": {
-                "status": qdrant_status,
-                "message": qdrant_message,
-                "telemetry_count": telemetry_count
-            },
-            "overall_status": "healthy" if pg_status == "healthy" and qdrant_status == "healthy" else "degraded"
-        }
+        vector = model.encode(query).tolist()
+        results = qdrant_client.search(
+            collection_name=QDRANT_COLLECTION,
+            query_vector=vector,
+            limit=k,
+            score_threshold=0.3  # Only return reasonably similar results
+        )
         
+        return [
+            {
+                "id": r.id,
+                "score": r.score,
+                "robot_id": r.payload.get("robot_id"),
+                "timestamp": r.payload.get("timestamp"),
+                "text": r.payload.get("searchable_text"),
+                "data": {k: v for k, v in r.payload.items() if k not in ["searchable_text", "type"]}
+            }
+            for r in results
+        ]
     except Exception as e:
-        return {
-            "timestamp": datetime.now().isoformat(),
-            "error": str(e),
-            "overall_status": "unhealthy"
+        print(f"❌ Error searching telemetry: {e}")
+        return []
+
+# ─── ENHANCED MESSAGE HANDLING ─────────────────────────
+def add_mcp_message(message_data):
+    """Enhanced MCP message logging with vector storage"""
+    chain_id = str(uuid4())
+    timestamp = datetime.now().isoformat()
+    
+    # Store in PostgreSQL
+    try:
+        with psycopg2.connect(**DB_CONFIG) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO mcp_message_chains (id, message_chain, created_at)
+                    VALUES (%s, %s, %s);
+                """, (chain_id, Json(message_data), timestamp))
+            conn.commit()
+    except Exception as e:
+        print(f"❌ Failed to store MCP message in PostgreSQL: {e}")
+        raise
+    
+    # Create searchable text and store in Qdrant
+    try:
+        searchable_text = create_message_search_text(message_data)
+        vector = model.encode(searchable_text).tolist()
+        
+        qdrant_client.upsert(
+            collection_name=CHAT_COLLECTION,
+            points=[PointStruct(
+                id=chain_id,
+                vector=vector,
+                payload={
+                    "timestamp": timestamp,
+                    "type": "chat_message",
+                    "searchable_text": searchable_text,
+                    **message_data
+                }
+            )]
+        )
+    except Exception as e:
+        print(f"❌ Failed to store MCP message in Qdrant: {e}")
+        # Don't raise here, PostgreSQL storage succeeded
+    
+    print(f"✅ MCP message logged with ID: {chain_id}")
+    return chain_id
+
+def create_message_search_text(message_data):
+    """Create searchable text from message data"""
+    text_parts = []
+    
+    role = message_data.get("role", "unknown")
+    source = message_data.get("source", "unknown")
+    
+    text_parts.append(f"{role} {source}")
+    
+    # Add message content
+    for key in ["message", "command", "response"]:
+        if message_data.get(key):
+            text_parts.append(message_data[key])
+    
+    # Add agent/robot context
+    if message_data.get("agent_id"):
+        text_parts.append(f"from {message_data['agent_id']}")
+    
+    return " ".join(text_parts)
+
+def get_relevant_chat_context(query, k=5):
+    """Get relevant chat history for a query"""
+    try:
+        vector = model.encode(query).tolist()
+        results = qdrant_client.search(
+            collection_name=CHAT_COLLECTION,
+            query_vector=vector,
+            limit=k,
+            score_threshold=0.3
+        )
+        
+        return [
+            {
+                "id": r.id,
+                "score": r.score,
+                "timestamp": r.payload.get("timestamp"),
+                "text": r.payload.get("searchable_text"),
+                "role": r.payload.get("role"),
+                "source": r.payload.get("source")
+            }
+            for r in results
+        ]
+    except Exception as e:
+        print(f"❌ Error searching chat context: {e}")
+        return []
+
+# ─── CONTEXT BUILDING FOR LLM ──────────────────────────
+def build_comprehensive_context(user_query, robot_id=None):
+    """Build comprehensive context for LLM including telemetry and chat history"""
+    context = {
+        "query": user_query,
+        "timestamp": datetime.now().isoformat(),
+        "robot_telemetry": [],
+        "stuck_robots": [],
+        "relevant_chat": [],
+        "recent_activity": []
+    }
+    
+    # Get relevant telemetry based on query
+    telemetry_results = search_telemetry_context(user_query, k=5)
+    context["robot_telemetry"] = telemetry_results
+    
+    # Get stuck robots (always important for navigation queries)
+    stuck_robots = get_stuck_robots()
+    context["stuck_robots"] = [
+        {
+            "robot_id": row[0],
+            "position": {"x": row[2], "y": row[3]},
+            "current_waypoint": row[4],
+            "target_waypoint": row[5]
         }
+        for row in stuck_robots
+    ]
+    
+    # Get relevant chat history
+    chat_results = get_relevant_chat_context(user_query, k=3)
+    context["relevant_chat"] = chat_results
+    
+    # Get recent telemetry for specified robot or all robots
+    recent_telemetry = get_recent_telemetry_context(robot_id, hours_back=0.5, max_entries=5)
+    context["recent_activity"] = [
+        {
+            "robot_id": row[0],
+            "timestamp": row[1].isoformat(),
+            "position": {"x": row[2], "y": row[3]},
+            "expected_position": {"x": row[4], "y": row[5]},
+            "speed": row[6],
+            "stuck": row[7],
+            "current_waypoint": row[8],
+            "target_waypoint": row[9],
+            "status": row[10]
+        }
+        for row in recent_telemetry
+    ]
+    
+    return context
+
+# ─── LEGACY COMPATIBILITY ──────────────────────────────
+def add_telemetry_data(data_text, metadata=None):
+    """Legacy function for backward compatibility"""
+    if metadata is None:
+        metadata = {}
+    
+    data_id = str(uuid4())
+    vector = model.encode(data_text).tolist()
+    
+    qdrant_client.upsert(
+        collection_name=QDRANT_COLLECTION,
+        points=[PointStruct(id=data_id, vector=vector, payload=metadata)]
+    )
+    
+    return data_id
+
+def retrieve_telemetry(query, k=3):
+    """Legacy function for backward compatibility"""
+    return search_telemetry_context(query, k)
+
+def add_agent_relationship(agent_id, relationship):
+    """Store agent relationship data"""
+    relationship_id = str(uuid4())
+    
+    with psycopg2.connect(**DB_CONFIG) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO agent_relationships (id, agent_id, relationship)
+                VALUES (%s, %s, %s);
+            """, (relationship_id, agent_id, Json(relationship)))
+        conn.commit()
+    
+    return relationship_id
+
+def add_mcp_message_chain(message_chain):
+    """Legacy function - use add_mcp_message instead"""
+    return add_mcp_message(message_chain)
