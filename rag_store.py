@@ -15,7 +15,7 @@ TELEMETRY_COLLECTION = "robot_telemetry"
 
 DB_CONFIG = {
     "dbname": "rag_db",
-    "user": "postgres",
+    "user": "postgres", 
     "password": "password",
     "host": "localhost",
     "port": "5432"
@@ -26,32 +26,33 @@ model = SentenceTransformer(EMBED_MODEL)
 
 def init_stores():
     """Initialize PostgreSQL tables and Qdrant collections"""
-    # PostgreSQL - Chat messages only
+    # PostgreSQL - Simplified chat messages table
     try:
         with psycopg2.connect(**DB_CONFIG) as conn:
             conn.autocommit = True
             with conn.cursor() as cur:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
                 
-                # Simple chat messages table
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS chat_messages (
                         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         role TEXT NOT NULL,
                         content TEXT NOT NULL,
                         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        user_id TEXT,
-                        metadata JSONB
+                        conversation_id TEXT NOT NULL,
+                        user_type TEXT NOT NULL,
+                        user_id TEXT NOT NULL
                     );
                 """)
                 
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_timestamp ON chat_messages(timestamp DESC);")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_conversation ON chat_messages(conversation_id, timestamp);")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_user ON chat_messages(user_id, timestamp);")
         print("✅ PostgreSQL ready.")
     except Exception as e:
         print(f"❌ PostgreSQL init failed: {e}")
         raise
 
-    # Qdrant - Telemetry vectors only
+    # Qdrant - Telemetry vectors
     if not qdrant_client.collection_exists(TELEMETRY_COLLECTION):
         qdrant_client.recreate_collection(
             collection_name=TELEMETRY_COLLECTION,
@@ -59,66 +60,106 @@ def init_stores():
         )
         print(f"✅ Qdrant collection '{TELEMETRY_COLLECTION}' created.")
 
-# ── CHAT FUNCTIONS (PostgreSQL) ──────────────────────────
-def store_chat_message(role: str, content: str, user_id: str = None, metadata: dict = None):
-    """Store chat message in PostgreSQL"""
+# ── CHAT FUNCTIONS ──────────────────────────────────────
+def store_chat_message(role: str, content: str, conversation_id: str, user_type: str, user_id: str):
+    """Store chat message with simplified schema"""
     try:
         with psycopg2.connect(**DB_CONFIG) as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO chat_messages (role, content, user_id, metadata)
-                    VALUES (%s, %s, %s, %s) RETURNING id;
-                """, (role, content, user_id, Json(metadata) if metadata else None))
+                    INSERT INTO chat_messages (role, content, conversation_id, user_type, user_id)
+                    VALUES (%s, %s, %s, %s, %s) RETURNING id;
+                """, (role, content, conversation_id, user_type, user_id))
                 message_id = cur.fetchone()[0]
             conn.commit()
+            print(f"💾 Stored {role} message: {conversation_id}")
             return str(message_id)
     except Exception as e:
         print(f"❌ Error storing chat message: {e}")
         return None
 
-def get_recent_chat_messages(limit: int = 10, user_id: str = None):
-    """Get recent chat messages for context"""
+def get_conversation_history(conversation_id: str, limit: int = 20):
+    """Get messages for a specific conversation"""
     try:
         with psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor) as conn:
             with conn.cursor() as cur:
-                if user_id:
-                    cur.execute("""
-                        SELECT role, content, timestamp, metadata
-                        FROM chat_messages 
-                        WHERE user_id = %s OR user_id IS NULL
-                        ORDER BY timestamp DESC 
-                        LIMIT %s;
-                    """, (user_id, limit))
-                else:
-                    cur.execute("""
-                        SELECT role, content, timestamp, metadata
-                        FROM chat_messages 
-                        ORDER BY timestamp DESC 
-                        LIMIT %s;
-                    """, (limit,))
+                cur.execute("""
+                    SELECT role, content, timestamp
+                    FROM chat_messages 
+                    WHERE conversation_id = %s
+                    ORDER BY timestamp ASC 
+                    LIMIT %s;
+                """, (conversation_id, limit))
                 
                 return [dict(row) for row in cur.fetchall()]
     except Exception as e:
-        print(f"❌ Error getting chat messages: {e}")
+        print(f"❌ Error getting conversation history: {e}")
         return []
 
-# ── TELEMETRY FUNCTIONS (Qdrant) ─────────────────────────
-def store_telemetry_vector(robot_id: str, telemetry_data: dict):
-    """Store telemetry data as vector in Qdrant"""
+def get_recent_chat_context(user_id: str, limit: int = 5):
+    """Get recent chat context for user across conversations"""
     try:
-        # Create searchable text from telemetry
+        with psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT role, content, timestamp, conversation_id
+                    FROM chat_messages 
+                    WHERE user_id = %s
+                    ORDER BY timestamp DESC 
+                    LIMIT %s;
+                """, (user_id, limit))
+                
+                return [dict(row) for row in cur.fetchall()]
+    except Exception as e:
+        print(f"❌ Error getting chat context: {e}")
+        return []
+
+def get_recent_chat_logs(limit: int = 20):
+    """Get recent chat messages for web interface display"""
+    try:
+        with psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, role, content, timestamp, conversation_id, user_type, user_id
+                    FROM chat_messages 
+                    ORDER BY timestamp DESC 
+                    LIMIT %s;
+                """, (limit,))
+                
+                messages = []
+                for row in cur.fetchall():
+                    messages.append([
+                        str(row['id']),
+                        {
+                            'role': row['role'],
+                            'content': row['content'][:200] + '...' if len(row['content']) > 200 else row['content'],
+                            'conversation_id': row['conversation_id'],
+                            'user_type': row['user_type'],
+                            'user_id': row['user_id']
+                        },
+                        None,  # Placeholder for compatibility
+                        row['timestamp'].isoformat() if row['timestamp'] else None
+                    ])
+                return messages
+    except Exception as e:
+        print(f"❌ Error getting recent chat logs: {e}")
+        return []
+
+# ── TELEMETRY FUNCTIONS ─────────────────────────────────
+def store_telemetry_vector(robot_id: str, telemetry_data: dict):
+    """Store simplified telemetry data as vector"""
+    try:
+        # Simple searchable text
+        pos = telemetry_data.get('position', {})
         searchable_text = f"""
-        Robot {robot_id} at position ({telemetry_data.get('position', {}).get('x', 0):.2f}, {telemetry_data.get('position', {}).get('y', 0):.2f})
+        Robot {robot_id} position ({pos.get('x', 0):.1f}, {pos.get('y', 0):.1f})
         Status: {telemetry_data.get('navigation_status', 'unknown')}
-        Speed: {telemetry_data.get('movement_speed', 0):.2f} m/s
-        Waypoint: {telemetry_data.get('current_waypoint', 'none')} -> {telemetry_data.get('target_waypoint', 'none')}
         Stuck: {telemetry_data.get('is_stuck', False)}
+        Waypoint: {telemetry_data.get('current_waypoint', 'none')}
         """.strip()
         
-        # Generate vector embedding
         vector = model.encode(searchable_text).tolist()
         
-        # Store in Qdrant
         point_id = str(uuid4())
         qdrant_client.upsert(
             collection_name=TELEMETRY_COLLECTION,
@@ -128,174 +169,120 @@ def store_telemetry_vector(robot_id: str, telemetry_data: dict):
                 payload={
                     "robot_id": robot_id,
                     "timestamp": telemetry_data.get("timestamp", datetime.now().isoformat()),
-                    "searchable_text": searchable_text,
-                    "telemetry": telemetry_data
+                    "telemetry": telemetry_data,
+                    "searchable_text": searchable_text
                 }
             )]
         )
         
+        print(f"📊 Stored telemetry vector for {robot_id}")
         return point_id
     except Exception as e:
-        print(f"❌ Error storing telemetry vector: {e}")
+        print(f"❌ Error storing telemetry: {e}")
         return None
 
-def search_telemetry_context(query: str, robot_id: str = None, limit: int = 5):
-    """Search telemetry vectors for relevant context"""
+def get_robot_status(robot_id: str = None):
+    """Get current robot status from recent telemetry"""
     try:
-        vector = model.encode(query).tolist()
+        # Simple search for recent telemetry
+        query_vector = model.encode(f"robot {robot_id or ''} status").tolist()
         
-        # Add robot_id filter if specified
-        query_filter = None
+        filter_condition = None
         if robot_id:
-            query_filter = {"must": [{"key": "robot_id", "match": {"value": robot_id}}]}
+            filter_condition = {"must": [{"key": "robot_id", "match": {"value": robot_id}}]}
         
         results = qdrant_client.search(
             collection_name=TELEMETRY_COLLECTION,
-            query_vector=vector,
-            query_filter=query_filter,
-            limit=limit,
-            score_threshold=0.3
+            query_vector=query_vector,
+            query_filter=filter_condition,
+            limit=10
         )
         
-        return [
-            {
-                "robot_id": r.payload.get("robot_id"),
-                "timestamp": r.payload.get("timestamp"),
-                "score": r.score,
-                "telemetry": r.payload.get("telemetry", {}),
-                "context": r.payload.get("searchable_text")
-            }
-            for r in results
-        ]
+        # Get most recent per robot
+        robot_status = {}
+        for result in results:
+            rid = result.payload.get("robot_id")
+            timestamp = result.payload.get("timestamp")
+            
+            if rid not in robot_status or timestamp > robot_status[rid]["last_seen"]:
+                robot_status[rid] = {
+                    "robot_id": rid,
+                    "last_seen": timestamp,
+                    "telemetry": result.payload.get("telemetry", {})
+                }
+        
+        return list(robot_status.values())
+        
     except Exception as e:
-        print(f"❌ Error searching telemetry: {e}")
+        print(f"❌ Error getting robot status: {e}")
         return []
 
-# ── CONTEXT BUILDING ─────────────────────────────────────
-def build_conversation_context(query: str, user_id: str = None, robot_id: str = None):
-    """Build complete context for LLM from both chat and telemetry"""
-    context = {
-        "query": query,
-        "timestamp": datetime.now().isoformat(),
-        "chat_history": [],
-        "telemetry_context": []
-    }
-    
-    # Get recent chat messages
-    context["chat_history"] = get_recent_chat_messages(limit=5, user_id=user_id)
-    
-    # Get relevant telemetry context
-    context["telemetry_context"] = search_telemetry_context(query, robot_id=robot_id, limit=3)
-    
-    return context
-
-# Add these utility functions to rag_store.py:
-
-def get_chat_statistics() -> dict:
-    """Get chat message statistics"""
+def get_recent_telemetry_logs(limit: int = 20):
+    """Get recent telemetry records for web interface display"""
     try:
-        with psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT 
-                        COUNT(*) as total_messages,
-                        COUNT(DISTINCT user_id) as unique_users,
-                        COUNT(CASE WHEN role = 'user' THEN 1 END) as user_messages,
-                        COUNT(CASE WHEN role = 'assistant' THEN 1 END) as assistant_messages,
-                        MAX(timestamp) as last_message,
-                        MIN(timestamp) as first_message
-                    FROM chat_messages;
-                """)
-                return dict(cur.fetchone())
-    except Exception as e:
-        print(f"❌ Error getting chat statistics: {e}")
-        return {}
-
-def get_telemetry_statistics() -> dict:
-    """Get telemetry statistics from Qdrant"""
-    try:
-        collection_info = qdrant_client.get_collection(TELEMETRY_COLLECTION)
-        
-        # Get recent telemetry for robot count
-        recent_telemetry = qdrant_client.search(
+        # Get recent points from Qdrant
+        results = qdrant_client.scroll(
             collection_name=TELEMETRY_COLLECTION,
-            query_vector=[0.0] * VECTOR_DIM,  # Dummy vector
-            limit=100,
-            score_threshold=0.0
+            limit=limit,
+            with_payload=True,
+            with_vectors=False
         )
         
-        # Count unique robots
-        unique_robots = set()
-        for point in recent_telemetry:
-            robot_id = point.payload.get("robot_id")
-            if robot_id:
-                unique_robots.add(robot_id)
+        records = []
+        if results[0]:  # Check if we have points
+            for point in results[0]:
+                records.append({
+                    "id": point.id,
+                    "payload": point.payload
+                })
         
-        return {
-            "total_points": collection_info.vectors_count,
-            "unique_robots": len(unique_robots),
-            "collection_status": collection_info.status.value if hasattr(collection_info.status, 'value') else str(collection_info.status)
-        }
+        # Sort by timestamp (most recent first)
+        records.sort(key=lambda x: x["payload"].get("timestamp", ""), reverse=True)
+        return records[:limit]
+        
     except Exception as e:
-        print(f"❌ Error getting telemetry statistics: {e}")
-        return {}
+        print(f"❌ Error getting recent telemetry logs: {e}")
+        return []
 
-def get_system_health() -> dict:
-    """Get overall system health status"""
-    chat_stats = get_chat_statistics()
-    telemetry_stats = get_telemetry_statistics()
-    
-    return {
-        "timestamp": datetime.now().isoformat(),
-        "postgres": {
-            "status": "healthy" if chat_stats else "error",
-            "stats": chat_stats
-        },
-        "qdrant": {
-            "status": "healthy" if telemetry_stats else "error", 
-            "stats": telemetry_stats
-        }
-    }
-
-# Improve context building with better error handling
-def build_conversation_context(query: str, user_id: str = None, robot_id: str = None):
-    """Build complete context for LLM from both chat and telemetry"""
+# ── CONTEXT BUILDING ────────────────────────────────────
+def build_conversation_context(conversation_id: str, user_id: str, query: str = ""):
+    """Build context for LLM from conversation and telemetry"""
     context = {
-        "query": query,
-        "timestamp": datetime.now().isoformat(),  # Already a string
-        "chat_history": [],
-        "telemetry_context": [],
-        "context_summary": ""
+        "conversation_history": get_conversation_history(conversation_id, limit=10),
+        "recent_context": get_recent_chat_context(user_id, limit=3),
+        "robot_status": get_robot_status() if user_id.startswith('robot_') else []
     }
     
-    try:
-        # Get recent chat messages and convert timestamps to strings
-        chat_history = get_recent_chat_messages(limit=5, user_id=user_id)
-        for message in chat_history:
-            if 'timestamp' in message and isinstance(message['timestamp'], datetime):
-                message['timestamp'] = message['timestamp'].isoformat()
-        context["chat_history"] = chat_history
-    except Exception as e:
-        print(f"⚠️ Could not load chat history: {e}")
-    
-    try:
-        # Get relevant telemetry context and convert timestamps to strings
-        telemetry_context = search_telemetry_context(query, robot_id=robot_id, limit=3)
-        for point in telemetry_context:
-            if 'timestamp' in point and isinstance(point['timestamp'], str):
-                try:
-                    # If it's already a string, parse and re-format to ensure consistency
-                    dt = datetime.fromisoformat(point['timestamp'])
-                    point['timestamp'] = dt.isoformat()
-                except ValueError:
-                    pass
-        context["telemetry_context"] = telemetry_context
-    except Exception as e:
-        print(f"⚠️ Could not load telemetry context: {e}")
-    
-    # Create summary
-    chat_count = len(context["chat_history"])
-    telemetry_count = len(context["telemetry_context"])
-    context["context_summary"] = f"Context: {chat_count} chat messages, {telemetry_count} telemetry points"
+    # Convert timestamps to strings for JSON serialization
+    for section in ['conversation_history', 'recent_context']:
+        for msg in context[section]:
+            if isinstance(msg.get('timestamp'), datetime):
+                msg['timestamp'] = msg['timestamp'].isoformat()
     
     return context
+
+# ── SIMPLE STATS ───────────────────────────────────────
+def get_system_health():
+    """Basic system health check"""
+    try:
+        # Test PostgreSQL
+        with psycopg2.connect(**DB_CONFIG) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM chat_messages;")
+                message_count = cur.fetchone()[0]
+        
+        # Test Qdrant
+        collection_info = qdrant_client.get_collection(TELEMETRY_COLLECTION)
+        
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "postgres_messages": message_count,
+            "qdrant_vectors": collection_info.vectors_count,
+            "status": "healthy"
+        }
+    except Exception as e:
+        return {
+            "timestamp": datetime.now().isoformat(), 
+            "status": "error",
+            "error": str(e)
+        }
