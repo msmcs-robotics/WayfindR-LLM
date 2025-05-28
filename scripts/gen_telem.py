@@ -1,318 +1,259 @@
 #!/usr/bin/env python3
 """
-Sample telemetry sender for Robot Guidance System
-Sends realistic telemetry data to test the MCP chat app
+Robot Telemetry Simulator
+Simulates a robot navigating between office1 and office2, getting stuck, and continuing.
+Sends realistic telemetry data to the Robot Guidance System.
 """
 
 import requests
-import json
 import time
 import random
-from datetime import datetime, timedelta
-import argparse
-import threading
+import math
+from datetime import datetime
+from typing import Dict, Tuple
 
 # Configuration
-MCP_SERVER_URL = "http://127.0.0.1:5000"
-TELEMETRY_ENDPOINT = f"{MCP_SERVER_URL}/telemetry"
+ROBOT_ID = "robot_alpha"
+TELEMETRY_ENDPOINT = "http://127.0.0.1:5000/telemetry"
+UPDATE_INTERVAL = 2.0  # seconds between telemetry updates
 
-# Sample waypoints for realistic navigation
-WAYPOINTS = [
-    "entrance", "reception", "lobby", "elevator", "stairs", 
-    "cafeteria", "meeting_room_a", "meeting_room_b", "exit", 
-    "parking", "restroom", "office_1", "office_2"
-]
+# Office locations (x, y coordinates)
+WAYPOINTS = {
+    "office1": {"x": 0.0, "y": 0.0},
+    "office2": {"x": 10.0, "y": 8.0},
+    "stuck_point": {"x": 5.2, "y": 4.1}  # Where robot gets stuck
+}
 
 class RobotSimulator:
-    """Simulates a robot with realistic telemetry patterns"""
-    
-    def __init__(self, robot_id, start_position=None):
+    def __init__(self, robot_id: str):
         self.robot_id = robot_id
-        self.position = start_position or {"x": random.uniform(0, 10), "y": random.uniform(0, 10)}
-        self.target_position = self.position.copy()
-        self.current_waypoint = random.choice(WAYPOINTS)
-        self.target_waypoint = self.current_waypoint
-        self.movement_speed = 0.0
+        self.position = {"x": 0.0, "y": 0.0}
+        self.target_waypoint = "office2"
+        self.current_waypoint = "office1"
+        self.speed = 0.8  # m/s
+        self.navigation_status = "navigating"
         self.is_stuck = False
-        self.navigation_status = "idle"
-        self.stuck_probability = 0.02  # 2% chance per update
-        self.unstuck_probability = 0.3  # 30% chance to get unstuck
+        self.distance_traveled = 0.0
+        self.stuck_duration = 0
+        self.mission_phase = "to_office2"  # to_office2, stuck, unstuck, to_office1
+        self.total_distance = 0.0
         
-    def update_position(self):
-        """Update robot position with realistic movement"""
-        if self.is_stuck:
-            # Stuck robots don't move much
-            self.movement_speed = random.uniform(0, 0.1)
-            noise_x = random.uniform(-0.05, 0.05)
-            noise_y = random.uniform(-0.05, 0.05)
-            self.position["x"] += noise_x
-            self.position["y"] += noise_y
-            
-            # Chance to get unstuck
-            if random.random() < self.unstuck_probability:
-                self.is_stuck = False
-                self.navigation_status = "navigating"
-                print(f"🟢 {self.robot_id} got unstuck!")
-                
-        else:
-            # Normal movement toward target
-            dx = self.target_position["x"] - self.position["x"]
-            dy = self.target_position["y"] - self.position["y"]
-            distance = (dx**2 + dy**2)**0.5
-            
-            if distance > 0.1:
-                # Moving toward target
-                self.movement_speed = random.uniform(0.3, 0.8)
-                move_distance = self.movement_speed * 0.1  # 0.1 second intervals
-                
-                if distance > move_distance:
-                    self.position["x"] += (dx / distance) * move_distance
-                    self.position["y"] += (dy / distance) * move_distance
-                    self.navigation_status = "navigating"
-                else:
-                    # Reached target
-                    self.position = self.target_position.copy()
-                    self.current_waypoint = self.target_waypoint
-                    self.navigation_status = "arrived"
-                    self.movement_speed = 0.0
-                    
-                    # Set new target after brief pause
-                    if random.random() < 0.3:  # 30% chance to get new target
-                        self._set_new_target()
-            else:
-                # At target, possibly idle
-                self.movement_speed = 0.0
-                if self.navigation_status == "arrived":
-                    self.navigation_status = "idle"
-                
-                # Maybe get new target
-                if random.random() < 0.1:  # 10% chance
-                    self._set_new_target()
-            
-            # Random chance to get stuck
-            if random.random() < self.stuck_probability:
+        print(f"🤖 {self.robot_id} initialized at office1")
+        print(f"📍 Starting position: ({self.position['x']:.2f}, {self.position['y']:.2f})")
+        print(f"🎯 First target: {self.target_waypoint}")
+
+    def calculate_distance(self, pos1: Dict, pos2: Dict) -> float:
+        """Calculate Euclidean distance between two points"""
+        dx = pos2["x"] - pos1["x"]
+        dy = pos2["y"] - pos1["y"]
+        return math.sqrt(dx*dx + dy*dy)
+
+    def move_towards_target(self, target_pos: Dict, dt: float) -> Dict:
+        """Move robot towards target position"""
+        current_pos = self.position.copy()
+        
+        # Calculate direction vector
+        dx = target_pos["x"] - current_pos["x"]
+        dy = target_pos["y"] - current_pos["y"]
+        distance_to_target = math.sqrt(dx*dx + dy*dy)
+        
+        if distance_to_target < 0.1:  # Close enough to target
+            return target_pos
+        
+        # Normalize direction and apply speed
+        if distance_to_target > 0:
+            dx = dx / distance_to_target
+            dy = dy / distance_to_target
+        
+        # Calculate movement with some randomness
+        movement_distance = self.speed * dt
+        noise_factor = 0.1  # Add some movement noise
+        
+        new_x = current_pos["x"] + dx * movement_distance + random.uniform(-noise_factor, noise_factor)
+        new_y = current_pos["y"] + dy * movement_distance + random.uniform(-noise_factor, noise_factor)
+        
+        # Track distance traveled
+        actual_movement = math.sqrt((new_x - current_pos["x"])**2 + (new_y - current_pos["y"])**2)
+        self.distance_traveled += actual_movement
+        self.total_distance += actual_movement
+        
+        return {"x": new_x, "y": new_y}
+
+    def update_mission_state(self):
+        """Update the robot's mission state based on current situation"""
+        current_pos = self.position
+        
+        if self.mission_phase == "to_office2":
+            # Check if we've reached the stuck point
+            stuck_pos = WAYPOINTS["stuck_point"]
+            if self.calculate_distance(current_pos, stuck_pos) < 0.5:
+                self.mission_phase = "stuck"
                 self.is_stuck = True
                 self.navigation_status = "stuck"
-                print(f"🔴 {self.robot_id} got stuck at ({self.position['x']:.2f}, {self.position['y']:.2f})")
-    
-    def _set_new_target(self):
-        """Set a new navigation target"""
-        self.target_waypoint = random.choice([wp for wp in WAYPOINTS if wp != self.current_waypoint])
-        self.target_position = {
-            "x": random.uniform(0, 10),
-            "y": random.uniform(0, 10)
-        }
-        self.navigation_status = "navigating"
-    
-    def generate_telemetry(self):
+                self.speed = 0.0
+                self.stuck_duration = 0
+                print(f"🔴 {self.robot_id} got stuck at ({current_pos['x']:.2f}, {current_pos['y']:.2f})!")
+                
+        elif self.mission_phase == "stuck":
+            self.stuck_duration += UPDATE_INTERVAL
+            if self.stuck_duration >= 10:  # Stuck for 10 seconds
+                self.mission_phase = "unstuck"
+                self.is_stuck = False
+                self.navigation_status = "navigating"
+                self.speed = 0.6  # Slower after getting unstuck
+                print(f"🟢 {self.robot_id} recovered and continuing to {self.target_waypoint}")
+                
+        elif self.mission_phase == "unstuck":
+            # Continue to office2
+            office2_pos = WAYPOINTS["office2"]
+            if self.calculate_distance(current_pos, office2_pos) < 0.5:
+                self.mission_phase = "to_office1"
+                self.current_waypoint = "office2"
+                self.target_waypoint = "office1"
+                self.navigation_status = "navigating"
+                self.speed = 0.8
+                self.distance_traveled = 0.0
+                print(f"✅ {self.robot_id} reached office2, now heading back to office1")
+                
+        elif self.mission_phase == "to_office1":
+            # Check if we've reached office1
+            office1_pos = WAYPOINTS["office1"]
+            if self.calculate_distance(current_pos, office1_pos) < 0.5:
+                self.mission_phase = "to_office2"
+                self.current_waypoint = "office1"
+                self.target_waypoint = "office2"
+                self.navigation_status = "navigating"
+                self.speed = 0.8
+                self.distance_traveled = 0.0
+                print(f"✅ {self.robot_id} reached office1, now heading back to office2")
+
+    def simulate_step(self, dt: float):
+        """Simulate one time step of robot movement"""
+        self.update_mission_state()
+        
+        if not self.is_stuck:
+            # Move towards current target
+            target_pos = WAYPOINTS[self.target_waypoint]
+            
+            # Special handling for getting to stuck point first
+            if self.mission_phase == "to_office2" and not self.is_stuck:
+                # First go to stuck point
+                target_pos = WAYPOINTS["stuck_point"]
+            
+            self.position = self.move_towards_target(target_pos, dt)
+
+    def generate_telemetry(self) -> Dict:
         """Generate realistic telemetry data"""
-        # Add some sensor noise
-        position_noise_x = random.uniform(-0.02, 0.02)
-        position_noise_y = random.uniform(-0.02, 0.02)
+        # Calculate expected position (where robot should be if following perfect path)
+        target_pos = WAYPOINTS[self.target_waypoint]
+        if self.mission_phase == "to_office2" and not self.is_stuck:
+            target_pos = WAYPOINTS["stuck_point"]
         
-        # Expected vs actual position (encoder vs GPS/localization)
-        expected_position = {
-            "x": self.position["x"] + position_noise_x,
-            "y": self.position["y"] + position_noise_y
-        }
+        # Expected position is slightly ahead on the path
+        expected_x = self.position["x"] + random.uniform(-0.3, 0.3)
+        expected_y = self.position["y"] + random.uniform(-0.3, 0.3)
         
-        # Sensor summary
-        obstacles_detected = random.randint(0, 5) if not self.is_stuck else random.randint(3, 8)
-        closest_obstacle = random.uniform(0.5, 3.0) if obstacles_detected > 0 else None
+        # Add some sensor noise to position
+        noisy_x = self.position["x"] + random.uniform(-0.1, 0.1)
+        noisy_y = self.position["y"] + random.uniform(-0.1, 0.1)
         
-        if self.is_stuck and closest_obstacle:
-            closest_obstacle = random.uniform(0.1, 0.5)  # Stuck robots have close obstacles
-        
-        sensor_summary = {
-            "obstacles_detected": obstacles_detected,
-            "closest_obstacle_distance": closest_obstacle,
-            "imu_stable": not self.is_stuck and random.random() > 0.1,
-            "wheel_encoder_error": random.uniform(0, 0.1) + (0.2 if self.is_stuck else 0)
-        }
-        
-        return {
+        telemetry = {
+            "robot_id": self.robot_id,
             "timestamp": datetime.now().isoformat(),
-            "position": self.position.copy(),
-            "expected_position": expected_position,
-            "movement_speed": self.movement_speed,
-            "distance_traveled": self.movement_speed * 0.1,  # Assuming 0.1s intervals
+            "position": {"x": round(noisy_x, 2), "y": round(noisy_y, 2)},
+            "expected_position": {"x": round(expected_x, 2), "y": round(expected_y, 2)},
+            "movement_speed": round(self.speed + random.uniform(-0.1, 0.1), 2),
+            "distance_traveled": round(self.distance_traveled, 2),
             "is_stuck": self.is_stuck,
             "current_waypoint": self.current_waypoint,
             "target_waypoint": self.target_waypoint,
             "navigation_status": self.navigation_status,
-            "sensor_summary": sensor_summary
-        }
-
-def send_telemetry(robot_id, telemetry_data, verbose=False):
-    """Send telemetry data to MCP server"""
-    payload = {
-        "robot_id": robot_id,
-        "telemetry": telemetry_data
-    }
-    
-    try:
-        response = requests.post(TELEMETRY_ENDPOINT, json=payload, timeout=5)
-        
-        if response.status_code == 200:
-            result = response.json()
-            if verbose:
-                status_indicator = "🔴" if telemetry_data.get("is_stuck") else "🟢"
-                pos = telemetry_data["position"]
-                waypoint_info = f"{telemetry_data['current_waypoint']} → {telemetry_data['target_waypoint']}"
-                print(f"{status_indicator} {robot_id}: ({pos['x']:.2f}, {pos['y']:.2f}) [{waypoint_info}] {telemetry_data['navigation_status']}")
-            return True
-        else:
-            print(f"❌ Failed to send telemetry for {robot_id}: {response.status_code} - {response.text}")
-            return False
-            
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Network error sending telemetry for {robot_id}: {e}")
-        return False
-
-def send_robot_message(robot_id, message, priority="medium", context=None):
-    """Send a message from robot to MCP system"""
-    payload = {
-        "robot_id": robot_id,
-        "message": message,
-        "priority": priority,
-        "context": context or {}
-    }
-    
-    try:
-        response = requests.post(f"{MCP_SERVER_URL}/robot_message", json=payload, timeout=5)
-        if response.status_code == 200:
-            result = response.json()
-            print(f"📨 {robot_id} message sent: {message}")
-            return result
-        else:
-            print(f"❌ Failed to send robot message: {response.status_code}")
-            return None
-    except Exception as e:
-        print(f"❌ Error sending robot message: {e}")
-        return None
-
-def simulate_robot(robot_id, duration_minutes=5, update_interval=1.0, verbose=False):
-    """Simulate a single robot for specified duration"""
-    robot = RobotSimulator(robot_id)
-    start_time = time.time()
-    end_time = start_time + (duration_minutes * 60)
-    
-    print(f"🤖 Starting simulation for {robot_id} (duration: {duration_minutes} minutes)")
-    
-    message_sent = False
-    
-    while time.time() < end_time:
-        # Update robot state
-        robot.update_position()
-        
-        # Generate and send telemetry
-        telemetry = robot.generate_telemetry()
-        success = send_telemetry(robot_id, telemetry, verbose)
-        
-        if not success:
-            print(f"⚠️  Failed to send telemetry for {robot_id}")
-        
-        # If robot gets stuck, send assistance message (once)
-        if robot.is_stuck and not message_sent:
-            context = {
-                "position": robot.position,
-                "target_waypoint": robot.target_waypoint,
-                "obstacles_nearby": telemetry["sensor_summary"]["obstacles_detected"]
+            "sensor_data": {
+                "battery_level": round(100 - (self.total_distance * 2), 1),  # Battery drains with distance
+                "obstacle_detected": self.is_stuck,
+                "gps_accuracy": round(random.uniform(0.5, 2.0), 1),
+                "wifi_signal": random.randint(70, 100)
             }
-            
-            messages = [
-                f"Robot {robot_id} stuck, need to move to {robot.target_waypoint}",
-                f"Help! {robot_id} cannot navigate, obstacles blocking path to {robot.target_waypoint}",
-                f"{robot_id} requesting assistance - stuck near {robot.current_waypoint}",
-            ]
-            
-            send_robot_message(robot_id, random.choice(messages), "high", context)
-            message_sent = True
-        elif not robot.is_stuck:
-            message_sent = False  # Reset when unstuck
+        }
         
-        time.sleep(update_interval)
-    
-    print(f"✅ Simulation completed for {robot_id}")
+        return telemetry
 
-def send_single_telemetry(robot_id="TestBot", stuck=False):
-    """Send a single telemetry data point"""
-    robot = RobotSimulator(robot_id)
-    
-    if stuck:
-        robot.is_stuck = True
-        robot.navigation_status = "stuck"
-        robot.movement_speed = 0.0
-    
-    telemetry = robot.generate_telemetry()
-    
-    print(f"🤖 Sending single telemetry for {robot_id}:")
-    print(json.dumps(telemetry, indent=2))
-    
-    success = send_telemetry(robot_id, telemetry, verbose=True)
-    
-    if success and stuck:
-        # Also send a help message
-        send_robot_message(robot_id, f"{robot_id} stuck, need assistance to reach {robot.target_waypoint}", "high")
-    
-    return success
+    def send_telemetry(self, telemetry: Dict) -> bool:
+        """Send telemetry to the server"""
+        try:
+            response = requests.post(TELEMETRY_ENDPOINT, json=telemetry, timeout=5)
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("status") == "success":
+                    return True
+                else:
+                    print(f"❌ Server error: {result.get('error', 'Unknown error')}")
+                    return False
+            else:
+                print(f"❌ HTTP error: {response.status_code}")
+                return False
+                
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Connection error: {e}")
+            return False
+
+    def print_status(self, telemetry: Dict):
+        """Print current robot status"""
+        pos = telemetry["position"]
+        status_emoji = "🔴" if self.is_stuck else "🟢"
+        
+        print(f"{status_emoji} [{datetime.now().strftime('%H:%M:%S')}] {self.robot_id}")
+        print(f"   📍 Position: ({pos['x']:.2f}, {pos['y']:.2f})")
+        print(f"   🚩 Route: {self.current_waypoint} → {self.target_waypoint}")
+        print(f"   🏃 Speed: {telemetry['movement_speed']:.2f} m/s")
+        print(f"   📏 Distance: {telemetry['distance_traveled']:.2f}m")
+        print(f"   🔋 Battery: {telemetry['sensor_data']['battery_level']:.1f}%")
+        
+        if self.is_stuck:
+            print(f"   ⚠️  STUCK for {self.stuck_duration:.1f}s!")
+        
+        print()
 
 def main():
-    parser = argparse.ArgumentParser(description="Send sample telemetry to Robot Guidance System")
-    parser.add_argument("--robots", "-r", type=str, nargs="+", default=["Robot1"], 
-                       help="Robot IDs to simulate (default: Robot1)")
-    parser.add_argument("--duration", "-d", type=float, default=2.0,
-                       help="Simulation duration in minutes (default: 2.0)")
-    parser.add_argument("--interval", "-i", type=float, default=1.0,
-                       help="Update interval in seconds (default: 1.0)")
-    parser.add_argument("--single", "-s", action="store_true",
-                       help="Send single telemetry point instead of continuous simulation")
-    parser.add_argument("--stuck", action="store_true",
-                       help="Make robot stuck (for single mode)")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                       help="Verbose output")
+    """Main simulation loop"""
+    print("🤖 Starting Robot Telemetry Simulator")
+    print(f"📡 Sending telemetry to: {TELEMETRY_ENDPOINT}")
+    print(f"🔄 Update interval: {UPDATE_INTERVAL}s")
+    print("=" * 50)
     
-    args = parser.parse_args()
+    robot = RobotSimulator(ROBOT_ID)
     
-    # Test server connectivity
     try:
-        response = requests.get(f"{MCP_SERVER_URL}/health", timeout=5)
-        if response.status_code == 200:
-            print(f"✅ MCP Server is running at {MCP_SERVER_URL}")
-        else:
-            print(f"⚠️  MCP Server responded with status {response.status_code}")
+        step_count = 0
+        while True:
+            step_count += 1
+            
+            # Simulate robot movement
+            robot.simulate_step(UPDATE_INTERVAL)
+            
+            # Generate and send telemetry
+            telemetry = robot.generate_telemetry()
+            success = robot.send_telemetry(telemetry)
+            
+            # Print status every few steps or when important events occur
+            if step_count % 3 == 0 or robot.is_stuck or robot.mission_phase == "unstuck":
+                robot.print_status(telemetry)
+                if success:
+                    print("   ✅ Telemetry sent successfully")
+                else:
+                    print("   ❌ Failed to send telemetry")
+                print()
+            
+            # Wait for next update
+            time.sleep(UPDATE_INTERVAL)
+            
+    except KeyboardInterrupt:
+        print("\n🛑 Simulation stopped by user")
+        print(f"📊 Total distance traveled: {robot.total_distance:.2f}m")
+        print("👋 Goodbye!")
     except Exception as e:
-        print(f"❌ Cannot connect to MCP Server at {MCP_SERVER_URL}: {e}")
-        print("Make sure the server is running with: python main_mcp.py")
-        return
-    
-    if args.single:
-        # Send single telemetry point
-        for robot_id in args.robots:
-            send_single_telemetry(robot_id, stuck=args.stuck)
-    else:
-        # Start continuous simulation
-        print(f"🚀 Starting telemetry simulation...")
-        print(f"   Robots: {', '.join(args.robots)}")
-        print(f"   Duration: {args.duration} minutes")
-        print(f"   Update interval: {args.interval} seconds")
-        print(f"   Server: {MCP_SERVER_URL}")
-        
-        # Create threads for each robot
-        threads = []
-        for robot_id in args.robots:
-            thread = threading.Thread(
-                target=simulate_robot,
-                args=(robot_id, args.duration, args.interval, args.verbose)
-            )
-            threads.append(thread)
-            thread.start()
-        
-        # Wait for all simulations to complete
-        for thread in threads:
-            thread.join()
-        
-        print("🏁 All robot simulations completed!")
+        print(f"\n❌ Simulation error: {e}")
 
 if __name__ == "__main__":
     main()

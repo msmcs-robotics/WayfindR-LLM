@@ -183,42 +183,98 @@ class TelemetryHandler:
             return {"error": str(e)}
 
     async def get_qdrant_logs(self) -> Dict[str, Any]:
-        """Get Qdrant vector database logs"""
+        """Get Qdrant vector database logs - FIXED to return records format expected by frontend"""
         try:
-            # This would typically interface with Qdrant's logging
-            # For now, return status info
             from qdrant_client import QdrantClient
+            from qdrant_client.models import Filter
+            
             client = QdrantClient(host="localhost", port=6333)
             
-            collections = client.get_collections()
-            collection_info = []
-            
-            for collection in collections.collections:
-                info = client.get_collection(collection.name)
-                collection_info.append({
-                    "name": collection.name,
-                    "vectors_count": info.vectors_count,
-                    "status": info.status
-                })
-            
-            return {
-                "status": "connected",
-                "collections": collection_info
-            }
+            # Get recent telemetry records from Qdrant
+            try:
+                # Get collection info
+                collection_info = client.get_collection("robot_telemetry")
+                
+                # Use scroll to get recent points instead of search
+                scroll_result = client.scroll(
+                    collection_name="robot_telemetry",
+                    limit=20,  # Get last 20 records
+                    with_payload=True,
+                    with_vectors=False
+                )
+                
+                records = []
+                for point in scroll_result[0]:  # scroll returns (points, next_page_offset)
+                    # Format as expected by frontend
+                    record = {
+                        "id": str(point.id),
+                        "payload": point.payload
+                    }
+                    records.append(record)
+                
+                return {
+                    "status": "success",
+                    "records": records,
+                    "total_points": collection_info.vectors_count,
+                    "collection_status": "healthy"
+                }
+                
+            except Exception as collection_error:
+                print(f"[QDRANT COLLECTION ERROR] {collection_error}")
+                return {
+                    "status": "error", 
+                    "records": [],
+                    "error": f"Collection error: {collection_error}"
+                }
             
         except Exception as e:
-            return {"error": str(e), "status": "error"}
+            print(f"[QDRANT CONNECTION ERROR] {e}")
+            return {
+                "status": "error",
+                "records": [],
+                "error": f"Connection error: {e}"
+            }
 
     async def get_postgres_logs(self) -> Dict[str, Any]:
-        """Get PostgreSQL database logs"""
+        """Get PostgreSQL database logs - FIXED to return correct data from chat_messages table"""
         try:
-            # Get recent chat message stats
             from rag_store import DB_CONFIG
             import psycopg2
             from psycopg2.extras import RealDictCursor
             
             with psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor) as conn:
                 with conn.cursor() as cur:
+                    # Get recent chat messages (these are the actual PostgreSQL records)
+                    cur.execute("""
+                        SELECT 
+                            id,
+                            role,
+                            content,
+                            timestamp,
+                            user_id,
+                            metadata
+                        FROM chat_messages 
+                        ORDER BY timestamp DESC 
+                        LIMIT 20;
+                    """)
+                    
+                    chat_records = []
+                    for row in cur.fetchall():
+                        # Format for frontend display as "message chains"
+                        record = [
+                            str(row['id']),
+                            {
+                                "role": row['role'],
+                                "content": row['content'][:200] + "..." if len(row['content']) > 200 else row['content'],
+                                "user_id": row['user_id'],
+                                "metadata": row['metadata']
+                            },
+                            {},  # Empty relationships field
+                            row['timestamp'].isoformat() if row['timestamp'] else datetime.now().isoformat()
+                        ]
+                        chat_records.append(record)
+                    
+                    # Get summary stats
                     cur.execute("""
                         SELECT 
                             COUNT(*) as total_messages,
@@ -227,15 +283,26 @@ class TelemetryHandler:
                         FROM chat_messages;
                     """)
                     stats = dict(cur.fetchone())
-            
-            return {
-                "status": "connected",
-                "database": DB_CONFIG["dbname"],
-                "stats": stats
-            }
+                    
+                    return {
+                        "status": "success",
+                        "message_chains": chat_records,
+                        "relationships": [],  # No relationships in our simple schema
+                        "stats": {
+                            "total_messages": stats['total_messages'],
+                            "unique_users": stats['unique_users'],
+                            "last_message": stats['last_message'].isoformat() if stats['last_message'] else None
+                        }
+                    }
             
         except Exception as e:
-            return {"error": str(e), "status": "error"}
+            print(f"[POSTGRES ERROR] {e}")
+            return {
+                "status": "error",
+                "message_chains": [],
+                "relationships": [],
+                "error": str(e)
+            }
 
     async def get_current_robot_status(self) -> Dict[str, Any]:
         """Get current status of all robots (for MCP tool)"""

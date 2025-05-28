@@ -8,6 +8,11 @@ from rag_store import (
     get_recent_chat_messages  # Add this import
 )
 from llm_config import get_ollama_client, get_model_name
+from prompts import (
+    handle_chat_prompt,
+    handle_llm_command_prompt,
+    handle_robot_message_prompt
+)
 
 class ChatHandler:
     """Simplified chat handler focusing on core functionality with enhanced debugging"""
@@ -74,7 +79,7 @@ class ChatHandler:
             print(f"📚 [DEBUG] Built context: {context.get('context_summary', 'No summary')}")
             
             # Prepare prompts
-            system_prompt = "You are a helpful assistant for a robot guidance system. Provide clear, concise responses."
+            system_prompt = handle_chat_prompt
             user_prompt = f"User message: {message}\n\nRecent context: {json.dumps(context, indent=2)}"
             
             print(f"🤖 [DEBUG] Calling Ollama with model: {self.llm_model}")
@@ -132,7 +137,7 @@ class ChatHandler:
             
             # Process with context
             context = build_conversation_context(command, user_id)
-            system_prompt = "You are processing navigation commands for a robot. Extract waypoints and navigation instructions. Be helpful and clear."
+            system_prompt = handle_llm_command_prompt
             
             # Convert context to JSON-safe format with multiple fallbacks
             try:
@@ -199,7 +204,7 @@ class ChatHandler:
             # Get context specific to this robot
             context = build_conversation_context(message, robot_id=robot_id)
             
-            system_prompt = "You are helping a robot that has encountered an issue. Provide guidance based on telemetry data."
+            system_prompt = handle_robot_message_prompt
             user_prompt = f"Robot {robot_id} says: {message}\nContext: {json.dumps(context, indent=2)}"
             
             response = self.ollama_client.chat(

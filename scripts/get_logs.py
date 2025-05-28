@@ -1,300 +1,273 @@
 #!/usr/bin/env python3
 """
-Database inspection tool for Robot Guidance System
-Displays contents of both PostgreSQL and Qdrant databases
+Simple log viewer for the Robot Guidance System
+Fetches and displays logs from both PostgreSQL (chat) and Qdrant (telemetry) in a readable format
 """
 
 import psycopg2
+from psycopg2.extras import RealDictCursor
 from qdrant_client import QdrantClient
-import json
 from datetime import datetime
-import argparse
+import json
 
-# Database configurations
+# Configuration (matching your system)
 DB_CONFIG = {
     "dbname": "rag_db",
-    "user": "postgres",
+    "user": "postgres", 
     "password": "password",
     "host": "localhost",
     "port": "5432"
 }
 
-QDRANT_CONFIG = {
-    "host": "localhost",
-    "port": 6333
-}
+QDRANT_HOST = "localhost"
+QDRANT_PORT = 6333
+TELEMETRY_COLLECTION = "robot_telemetry"
 
-def get_postgres_logs():
-    """Fetch and display PostgreSQL logs"""
-    print("=" * 60)
-    print("POSTGRESQL DATABASE CONTENTS")
-    print("=" * 60)
-    
+def print_header(title):
+    """Print a nice header"""
+    print("\n" + "="*60)
+    print(f" {title}")
+    print("="*60)
+
+def print_separator():
+    """Print a separator line"""
+    print("-" * 60)
+
+def get_chat_logs(limit=20):
+    """Fetch recent chat messages from PostgreSQL"""
     try:
-        with psycopg2.connect(**DB_CONFIG) as conn:
+        with psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor) as conn:
             with conn.cursor() as cur:
-                # Get table info
                 cur.execute("""
-                    SELECT table_name, column_name, data_type 
-                    FROM information_schema.columns 
-                    WHERE table_schema = 'public' 
-                    ORDER BY table_name, ordinal_position;
-                """)
-                
-                print("\n📊 DATABASE SCHEMA:")
-                current_table = None
-                for row in cur.fetchall():
-                    table_name, column_name, data_type = row
-                    if table_name != current_table:
-                        print(f"\n  Table: {table_name}")
-                        current_table = table_name
-                    print(f"    - {column_name}: {data_type}")
-                
-                # Robot telemetry
-                print(f"\n🤖 ROBOT TELEMETRY:")
-                cur.execute("""
-                    SELECT robot_id, timestamp, position_x, position_y, 
-                           is_stuck, current_waypoint, target_waypoint, navigation_status
-                    FROM robot_telemetry 
+                    SELECT 
+                        id, role, content, timestamp, user_id, metadata
+                    FROM chat_messages 
                     ORDER BY timestamp DESC 
-                    LIMIT 20;
-                """)
+                    LIMIT %s;
+                """, (limit,))
                 
-                telemetry_rows = cur.fetchall()
-                if telemetry_rows:
-                    print(f"  Recent {len(telemetry_rows)} entries:")
-                    for row in telemetry_rows:
-                        robot_id, timestamp, pos_x, pos_y, stuck, current_wp, target_wp, status = row
-                        stuck_indicator = "🔴 STUCK" if stuck else "🟢"
-                        print(f"    {stuck_indicator} {robot_id} @ ({pos_x:.2f}, {pos_y:.2f}) "
-                              f"[{current_wp} → {target_wp}] {status} ({timestamp})")
-                else:
-                    print("  No telemetry data found")
-                
-                # MCP message chains
-                print(f"\n💬 MCP MESSAGE CHAINS:")
-                cur.execute("""
-                    SELECT id, message_chain, created_at 
-                    FROM mcp_message_chains 
-                    ORDER BY created_at DESC 
-                    LIMIT 15;
-                """)
-                
-                message_rows = cur.fetchall()
-                if message_rows:
-                    print(f"  Recent {len(message_rows)} messages:")
-                    for row in message_rows:
-                        msg_id, message_data, created_at = row
-                        role = message_data.get("role", "unknown")
-                        source = message_data.get("source", "unknown")
-                        
-                        # Extract message content
-                        content = ""
-                        for key in ["message", "command", "response"]:
-                            if message_data.get(key):
-                                content = message_data[key][:60] + "..." if len(message_data[key]) > 60 else message_data[key]
-                                break
-                        
-                        agent_id = message_data.get("agent_id", "")
-                        print(f"    [{role}:{source}] {agent_id}: {content} ({created_at})")
-                else:
-                    print("  No message chains found")
-                
-                # Agent relationships
-                print(f"\n🔗 AGENT RELATIONSHIPS:")
-                cur.execute("""
-                    SELECT agent_id, relationship, created_at 
-                    FROM agent_relationships 
-                    ORDER BY created_at DESC 
-                    LIMIT 10;
-                """)
-                
-                relationship_rows = cur.fetchall()
-                if relationship_rows:
-                    print(f"  {len(relationship_rows)} relationships:")
-                    for row in relationship_rows:
-                        agent_id, relationship, created_at = row
-                        print(f"    {agent_id}: {json.dumps(relationship, indent=2)[:100]}... ({created_at})")
-                else:
-                    print("  No agent relationships found")
-                
-                # Summary stats
-                print(f"\n📈 SUMMARY STATISTICS:")
-                cur.execute("SELECT COUNT(*) FROM robot_telemetry;")
-                telemetry_count = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(*) FROM mcp_message_chains;")
-                message_count = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(*) FROM agent_relationships;")
-                relationship_count = cur.fetchone()[0]
-                
-                print(f"  Total telemetry entries: {telemetry_count}")
-                print(f"  Total message chains: {message_count}")
-                print(f"  Total agent relationships: {relationship_count}")
-                
+                return cur.fetchall()
     except Exception as e:
-        print(f"❌ PostgreSQL Error: {e}")
+        print(f"❌ Error fetching chat logs: {e}")
+        return []
 
-def get_qdrant_logs():
-    """Fetch and display Qdrant vector database contents"""
-    print("\n" + "=" * 60)
-    print("QDRANT VECTOR DATABASE CONTENTS")
-    print("=" * 60)
-    
+def get_telemetry_logs(limit=20):
+    """Fetch recent telemetry data from Qdrant"""
     try:
-        client = QdrantClient(**QDRANT_CONFIG)
+        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
         
-        # Get collections info
-        collections = client.get_collections()
-        print(f"\n📚 COLLECTIONS ({len(collections.collections)}):")
+        # Check if collection exists
+        if not client.collection_exists(TELEMETRY_COLLECTION):
+            print(f"⚠️  Collection '{TELEMETRY_COLLECTION}' does not exist")
+            return []
         
-        for collection in collections.collections:
-            collection_name = collection.name
-            collection_info = client.get_collection(collection_name)
-            
-            print(f"\n  Collection: {collection_name}")
-            print(f"    Vector size: {collection_info.config.params.vectors.size}")
-            print(f"    Distance metric: {collection_info.config.params.vectors.distance}")
-            print(f"    Points count: {collection_info.points_count}")
-            
-            # Get sample points
-            try:
-                scroll_result = client.scroll(
-                    collection_name=collection_name,
-                    limit=10,
-                    with_payload=True,
-                    with_vectors=False
-                )
-                
-                points = scroll_result[0]
-                if points:
-                    print(f"    Sample entries ({len(points)}):")
-                    for point in points[:5]:  # Show first 5
-                        payload = point.payload
-                        
-                        if collection_name == "telemetry_data":
-                            robot_id = payload.get("robot_id", "unknown")
-                            timestamp = payload.get("timestamp", "")
-                            searchable_text = payload.get("searchable_text", "")[:80] + "..."
-                            print(f"      🤖 {robot_id}: {searchable_text} ({timestamp})")
-                            
-                        elif collection_name == "chat_context":
-                            role = payload.get("role", "unknown")
-                            source = payload.get("source", "unknown")
-                            searchable_text = payload.get("searchable_text", "")[:80] + "..."
-                            timestamp = payload.get("timestamp", "")
-                            print(f"      💬 [{role}:{source}]: {searchable_text} ({timestamp})")
-                else:
-                    print("    No points found")
-                    
-            except Exception as e:
-                print(f"    ❌ Error reading points: {e}")
-                
-    except Exception as e:
-        print(f"❌ Qdrant Error: {e}")
-
-def get_stuck_robots():
-    """Show currently stuck robots"""
-    print("\n" + "=" * 60)
-    print("STUCK ROBOTS ANALYSIS")
-    print("=" * 60)
-    
-    try:
-        with psycopg2.connect(**DB_CONFIG) as conn:
-            with conn.cursor() as cur:
-                # Get stuck robots with details
-                cur.execute("""
-                    WITH latest_status AS (
-                        SELECT DISTINCT ON (robot_id) 
-                               robot_id, timestamp, is_stuck, position_x, position_y, 
-                               current_waypoint, target_waypoint, navigation_status,
-                               movement_speed, sensor_data
-                        FROM robot_telemetry 
-                        ORDER BY robot_id, timestamp DESC
-                    )
-                    SELECT * FROM latest_status WHERE is_stuck = TRUE;
-                """)
-                
-                stuck_robots = cur.fetchall()
-                if stuck_robots:
-                    print(f"\n🚨 {len(stuck_robots)} ROBOTS NEED ASSISTANCE:")
-                    for robot in stuck_robots:
-                        robot_id, timestamp, stuck, pos_x, pos_y, current_wp, target_wp, status, speed, sensor_data = robot
-                        print(f"\n  🔴 {robot_id}:")
-                        print(f"    Position: ({pos_x:.2f}, {pos_y:.2f})")
-                        print(f"    Waypoints: {current_wp} → {target_wp}")
-                        print(f"    Status: {status}")
-                        print(f"    Speed: {speed:.2f} m/s")
-                        print(f"    Last update: {timestamp}")
-                        if sensor_data:
-                            print(f"    Sensors: {json.dumps(sensor_data, indent=6)}")
-                else:
-                    print("\n✅ All robots are operating normally")
-                    
-    except Exception as e:
-        print(f"❌ Error checking stuck robots: {e}")
-
-def search_telemetry(query):
-    """Search telemetry using semantic similarity"""
-    print(f"\n" + "=" * 60)
-    print(f"SEMANTIC SEARCH: '{query}'")
-    print("=" * 60)
-    
-    try:
-        from sentence_transformers import SentenceTransformer
-        
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-        client = QdrantClient(**QDRANT_CONFIG)
-        
-        # Search telemetry
-        query_vector = model.encode(query).tolist()
-        results = client.search(
-            collection_name="telemetry_data",
-            query_vector=query_vector,
-            limit=5,
-            score_threshold=0.3
+        # Get recent points using scroll
+        scroll_result = client.scroll(
+            collection_name=TELEMETRY_COLLECTION,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False
         )
         
-        if results:
-            print(f"\n🔍 Found {len(results)} relevant telemetry entries:")
-            for i, result in enumerate(results, 1):
-                payload = result.payload
-                print(f"\n  {i}. Score: {result.score:.3f}")
-                print(f"     Robot: {payload.get('robot_id')}")
-                print(f"     Time: {payload.get('timestamp')}")
-                print(f"     Text: {payload.get('searchable_text')}")
+        return scroll_result[0]  # Return points (first element of tuple)
+        
+    except Exception as e:
+        print(f"❌ Error fetching telemetry logs: {e}")
+        return []
+
+def display_chat_logs(chat_logs):
+    """Display chat logs in a readable format"""
+    print_header("CHAT LOGS (PostgreSQL)")
+    
+    if not chat_logs:
+        print("No chat messages found.")
+        return
+    
+    print(f"📝 Found {len(chat_logs)} chat messages")
+    print()
+    
+    for i, msg in enumerate(reversed(chat_logs), 1):  # Show oldest first
+        timestamp = msg['timestamp'].strftime("%Y-%m-%d %H:%M:%S") if msg['timestamp'] else "Unknown"
+        role_emoji = {"user": "👤", "assistant": "🤖", "robot": "🦾"}.get(msg['role'], "❓")
+        
+        print(f"{i:2d}. [{timestamp}] {role_emoji} {msg['role'].upper()}")
+        if msg['user_id']:
+            print(f"    User ID: {msg['user_id']}")
+        
+        # Truncate long messages
+        content = msg['content']
+        if len(content) > 200:
+            content = content[:200] + "..."
+        
+        # Print content with indentation
+        for line in content.split('\n'):
+            print(f"    {line}")
+        
+        if msg['metadata']:
+            print(f"    📋 Metadata: {json.dumps(msg['metadata'], indent=6)}")
+        
+        print()
+
+def display_telemetry_logs(telemetry_logs):
+    """Display telemetry logs in a readable format"""
+    print_header("TELEMETRY LOGS (Qdrant)")
+    
+    if not telemetry_logs:
+        print("No telemetry data found.")
+        return
+    
+    print(f"📡 Found {len(telemetry_logs)} telemetry points")
+    print()
+    
+    # Group by robot_id and sort by timestamp
+    robot_data = {}
+    for point in telemetry_logs:
+        robot_id = point.payload.get("robot_id", "unknown")
+        if robot_id not in robot_data:
+            robot_data[robot_id] = []
+        robot_data[robot_id].append(point)
+    
+    # Sort each robot's data by timestamp
+    for robot_id in robot_data:
+        robot_data[robot_id].sort(
+            key=lambda x: x.payload.get("timestamp", ""), 
+            reverse=True
+        )
+    
+    # Display by robot
+    for robot_id, points in robot_data.items():
+        print(f"🦾 ROBOT: {robot_id}")
+        print_separator()
+        
+        for i, point in enumerate(points, 1):
+            payload = point.payload
+            telemetry = payload.get("telemetry", {})
+            
+            timestamp = payload.get("timestamp", "Unknown")
+            if timestamp != "Unknown":
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    timestamp = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except:
+                    pass
+            
+            print(f"  {i:2d}. [{timestamp}]")
+            
+            # Position info
+            pos = telemetry.get("position", {})
+            exp_pos = telemetry.get("expected_position", {})
+            print(f"      📍 Position: ({pos.get('x', 0):.2f}, {pos.get('y', 0):.2f})")
+            print(f"      🎯 Expected: ({exp_pos.get('x', 0):.2f}, {exp_pos.get('y', 0):.2f})")
+            
+            # Movement info
+            speed = telemetry.get("movement_speed", 0)
+            distance = telemetry.get("distance_traveled", 0)
+            print(f"      🏃 Speed: {speed:.2f} m/s, Distance: {distance:.2f}m")
+            
+            # Navigation info
+            current_wp = telemetry.get("current_waypoint", "none")
+            target_wp = telemetry.get("target_waypoint", "none")
+            nav_status = telemetry.get("navigation_status", "unknown")
+            stuck = telemetry.get("is_stuck", False)
+            
+            status_emoji = "🔴" if stuck else "🟢"
+            print(f"      {status_emoji} Status: {nav_status}")
+            print(f"      🚩 Route: {current_wp} → {target_wp}")
+            
+            if stuck:
+                print(f"      ⚠️  ROBOT IS STUCK!")
+            
+            print()
+        
+        print()
+
+def get_system_stats():
+    """Get basic system statistics"""
+    print_header("SYSTEM STATISTICS")
+    
+    # Chat stats
+    try:
+        with psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 
+                        COUNT(*) as total_messages,
+                        COUNT(DISTINCT user_id) as unique_users,
+                        COUNT(CASE WHEN role = 'user' THEN 1 END) as user_messages,
+                        COUNT(CASE WHEN role = 'assistant' THEN 1 END) as assistant_messages,
+                        COUNT(CASE WHEN role = 'robot' THEN 1 END) as robot_messages,
+                        MAX(timestamp) as last_message
+                    FROM chat_messages;
+                """)
+                
+                stats = dict(cur.fetchone())
+                
+                print("📊 CHAT DATABASE (PostgreSQL):")
+                print(f"   Total Messages: {stats['total_messages']}")
+                print(f"   Unique Users: {stats['unique_users']}")
+                print(f"   User Messages: {stats['user_messages']}")
+                print(f"   Assistant Messages: {stats['assistant_messages']}")
+                print(f"   Robot Messages: {stats['robot_messages']}")
+                
+                if stats['last_message']:
+                    last_msg = stats['last_message'].strftime("%Y-%m-%d %H:%M:%S")
+                    print(f"   Last Message: {last_msg}")
+                
+    except Exception as e:
+        print(f"❌ Error getting chat stats: {e}")
+    
+    # Telemetry stats
+    try:
+        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        
+        if client.collection_exists(TELEMETRY_COLLECTION):
+            collection_info = client.get_collection(TELEMETRY_COLLECTION)
+            
+            # Get unique robots
+            scroll_result = client.scroll(
+                collection_name=TELEMETRY_COLLECTION,
+                limit=100,
+                with_payload=True,
+                with_vectors=False
+            )
+            
+            unique_robots = set()
+            for point in scroll_result[0]:
+                robot_id = point.payload.get("robot_id")
+                if robot_id:
+                    unique_robots.add(robot_id)
+            
+            print("\n📡 TELEMETRY DATABASE (Qdrant):")
+            print(f"   Total Points: {collection_info.vectors_count}")
+            print(f"   Unique Robots: {len(unique_robots)}")
+            print(f"   Robots: {', '.join(sorted(unique_robots))}")
+            print(f"   Collection Status: {collection_info.status}")
+            
         else:
-            print(f"\n❌ No relevant telemetry found for: '{query}'")
+            print("\n📡 TELEMETRY DATABASE (Qdrant):")
+            print("   Collection does not exist")
             
     except Exception as e:
-        print(f"❌ Search Error: {e}")
+        print(f"❌ Error getting telemetry stats: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Inspect Robot Guidance System databases")
-    parser.add_argument("--postgres", "-p", action="store_true", help="Show PostgreSQL logs")
-    parser.add_argument("--qdrant", "-q", action="store_true", help="Show Qdrant logs")
-    parser.add_argument("--stuck", "-s", action="store_true", help="Show stuck robots")
-    parser.add_argument("--search", "-S", type=str, help="Search telemetry semantically")
-    parser.add_argument("--all", "-a", action="store_true", help="Show all logs")
+    """Main function to display all logs"""
+    print("🔍 Robot Guidance System - Log Viewer")
+    print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    args = parser.parse_args()
+    # Get system statistics
+    get_system_stats()
     
-    if not any([args.postgres, args.qdrant, args.stuck, args.search, args.all]):
-        args.all = True
+    # Get and display chat logs
+    chat_logs = get_chat_logs(limit=20)
+    display_chat_logs(chat_logs)
     
-    print(f"🤖 Robot Guidance System Database Inspector")
-    print(f"Generated at: {datetime.now().isoformat()}")
+    # Get and display telemetry logs
+    telemetry_logs = get_telemetry_logs(limit=20)
+    display_telemetry_logs(telemetry_logs)
     
-    if args.all or args.postgres:
-        get_postgres_logs()
-    
-    if args.all or args.qdrant:
-        get_qdrant_logs()
-    
-    if args.all or args.stuck:
-        get_stuck_robots()
-    
-    if args.search:
-        search_telemetry(args.search)
+    print_header("LOG VIEWING COMPLETE")
+    print("💡 Tip: Run with 'python log_viewer.py' to refresh logs")
 
 if __name__ == "__main__":
     main()
