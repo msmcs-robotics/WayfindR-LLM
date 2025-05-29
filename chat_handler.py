@@ -1,274 +1,250 @@
-import json
+# chat_handler.py - Fixed LLM response handling
 from datetime import datetime
 from fastapi import Request
-from typing import Dict, Any, Optional, List
-import uuid
-import re
+from typing import Dict, Any
+import ollama
+import traceback
+import json
 
-from rag_store import (
-    store_chat_message,
-    build_conversation_context,
-    get_conversation_history
-)
-from llm_config import get_ollama_client, get_model_name
-from prompts import web_chat_prompt, robot_chat_prompt
+from function_executor import FunctionExecutor
+from llm_intent_parser import LLMIntentParser
+from context_manager import get_context_manager
+from config_manager import get_config
+from utils import generate_conversation_id, success_response, error_response
 
 class ChatHandler:
-    """Streamlined handler for web and robot conversations with function calling"""
-    
     def __init__(self):
-        self.ollama_client = get_ollama_client()
-        self.llm_model = get_model_name()
+        self.config = get_config()
+        self.ollama_client = ollama.Client()
+        self.llm_model = self.config.llm.model_name
         
-        # Available waypoints for navigation
-        self.waypoints = {
-            'reception', 'cafeteria', 'meeting_room_a', 'meeting_room_b', 
-            'elevator', 'exit', 'main_hall'
-        }
+        # Initialize components
+        self.intent_parser = LLMIntentParser()
+        self.function_executor = FunctionExecutor()
+        self.context_manager = get_context_manager()
         
-        print(f"✅ ChatHandler initialized with model: {self.llm_model}")
-
-    def _extract_response(self, response):
-        """Extract response text from Ollama response"""
-        try:
-            if hasattr(response, 'message') and hasattr(response.message, 'content'):
-                return response.message.content
-            elif hasattr(response, 'content'):
-                return response.content
-            elif isinstance(response, dict):
-                if 'message' in response and 'content' in response['message']:
-                    return response['message']['content']
-                elif 'response' in response:
-                    return response['response']
-            return str(response)
-        except Exception as e:
-            print(f"❌ Error extracting response: {e}")
-            return f"Error extracting response: {e}"
-
-    def _generate_conversation_id(self, user_type: str, user_id: str) -> str:
-        """Generate unique conversation ID"""
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        return f"{user_type}_{user_id}_{timestamp}_{str(uuid.uuid4())[:8]}"
+        # Get waypoints from config
+        self.waypoints = set(self.config.robot.waypoints)
+        print(f"✅ ChatHandler initialized with {len(self.waypoints)} waypoints")
 
     async def handle_web_chat(self, request: Request) -> Dict[str, Any]:
-        """Handle chat messages from web users - for system monitoring/debugging"""
         try:
             data = await request.json()
             message = data.get('message')
             user_id = data.get('user_id', 'web_admin')
-            conversation_id = data.get('conversation_id')
+            conversation_id = data.get('conversation_id') or generate_conversation_id('web', user_id)
             
             if not message:
-                return {"error": "No message provided", "success": False}
-            
-            if not conversation_id:
-                conversation_id = self._generate_conversation_id('web', user_id)
+                return error_response("No message provided")
             
             print(f"💬 Web chat - User: {user_id}, Conv: {conversation_id}")
+            print(f"💬 User message: {message}")
             
             # Store user message
-            store_chat_message("user", message, conversation_id, "web", user_id)
+            message_id = await self.context_manager.db.store_chat_message("user", message, conversation_id, "web", user_id)
+            print(f"✅ Stored user message with ID: {message_id}")
             
-            # Build context and generate response
-            context = build_conversation_context(conversation_id, user_id, message)
+            # Phase 1: Parse intent
+            intent_data = await self.intent_parser.parse_web_intent(message)
+            print(f"🎯 Intent parsed: {intent_data}")
             
-            response = self.ollama_client.chat(
-                model=self.llm_model,
-                messages=[
-                    {"role": "system", "content": web_chat_prompt},
-                    {"role": "user", "content": f"User message: {message}\n\nContext: {json.dumps(context, default=str)}"}
-                ]
-            )
+            # Phase 2: Build context and generate response
+            context = await self.context_manager.build_web_context(conversation_id, user_id, message, intent_data)
+            print(f"📝 Context built: {len(context.get('active_robots', []))} active robots")
             
-            assistant_response = self._extract_response(response)
+            response = await self._generate_web_response(context, intent_data, message)
+            print(f"🤖 Generated response: {response[:100]}..." if len(response) > 100 else f"🤖 Generated response: {response}")
             
             # Store assistant response
-            store_chat_message("assistant", assistant_response, conversation_id, "web", user_id)
+            response_id = await self.context_manager.db.store_chat_message("assistant", response, conversation_id, "web", user_id)
+            print(f"✅ Stored assistant response with ID: {response_id}")
             
-            return {
-                "response": assistant_response,
+            result = {
+                "response": response,
                 "conversation_id": conversation_id,
-                "success": True
+                "intent_data": intent_data,
+                "active_robots": context.get('active_robots', [])
             }
             
+            print(f"📤 Returning success response: {json.dumps(result, indent=2)}")
+            return success_response(result)
+            
         except Exception as e:
-            print(f"❌ Web chat error: {e}")
-            return {"error": str(e), "success": False}
+            print(f"❌ Web chat error: {repr(e)}")
+            traceback.print_exc()
+            return error_response(str(e))
 
     async def handle_robot_chat(self, request: Request) -> Dict[str, Any]:
-        """Handle chat messages from robot users with function calling"""
+        """Handle robot user chat - navigation and small talk focused"""
         try:
             data = await request.json()
             robot_id = data.get('robot_id')
             user_message = data.get('user_message')
-            conversation_id = data.get('conversation_id')
+            conversation_id = data.get('conversation_id') or generate_conversation_id('robot', robot_id)
             
             if not robot_id or not user_message:
-                return {"error": "Missing robot_id or user_message", "success": False}
-            
-            if not conversation_id:
-                conversation_id = self._generate_conversation_id('robot', robot_id)
+                return error_response("Missing robot_id or user_message")
             
             user_id = f"robot_{robot_id}"
-            print(f"🤖 Robot chat - Robot: {robot_id}, Conv: {conversation_id}")
+            print(f"🤖 Robot chat - Robot: {robot_id}")
             
             # Store user message
-            store_chat_message("user", user_message, conversation_id, "robot", user_id)
+            await self.context_manager.db.store_chat_message("user", user_message, conversation_id, "robot", user_id)
             
-            # Build context and generate response
-            context = build_conversation_context(conversation_id, user_id, user_message)
+            # Phase 1: Parse intent and function calls
+            intent_data = await self.intent_parser.parse_robot_intent(user_message, robot_id, list(self.waypoints))
             
-            # Enhanced prompt with function calling instructions
-            enhanced_prompt = f"""
-{robot_chat_prompt}
-
-FUNCTION CALLING:
-If user wants navigation, respond with: NAVIGATE_TO: [waypoint1, waypoint2, ...]
-If robot reports being stuck, respond with: CREATE_ALERT: [description]
-
-Available waypoints: {', '.join(self.waypoints)}
-
-User message: {user_message}
-Robot ID: {robot_id}
-Recent conversation: {json.dumps(context.get('conversation_history', [])[-3:], default=str)}
-"""
+            # Execute function calls if any
+            function_results = {}
+            if intent_data.get('function_calls'):
+                function_results = await self.function_executor.execute_functions(
+                    intent_data['function_calls'], robot_id, user_message
+                )
             
+            # Phase 2: Generate response
+            context = await self.context_manager.build_robot_context(conversation_id, robot_id)
+            response = await self._generate_robot_response(context, intent_data, function_results, user_message, robot_id)
+            
+            # Store response
+            await self.context_manager.db.store_chat_message("assistant", response, conversation_id, "robot", user_id)
+            
+            result_data = {
+                "robot_response": response,
+                "conversation_id": conversation_id,
+                "robot_id": robot_id,
+                "intent_data": intent_data
+            }
+            
+            if function_results:
+                result_data["function_results"] = function_results
+            
+            return success_response(result_data)
+            
+        except Exception as e:
+            print(f"❌ Robot chat error: {repr(e)}")
+            traceback.print_exc()
+            return error_response(str(e))
+
+    async def _generate_web_response(self, context: Dict, intent_data: Dict, message: str) -> str:
+        prompt = self._build_web_prompt(context, intent_data, message)
+        print(f"🔍 LLM prompt preview: {prompt[:200]}...")
+        
+        try:
+            # FIXED: Use proper ollama.chat() call with messages array
             response = self.ollama_client.chat(
                 model=self.llm_model,
                 messages=[
-                    {"role": "system", "content": enhanced_prompt}
+                    {"role": "user", "content": prompt}  # Changed from system to user
                 ]
             )
             
-            robot_response = self._extract_response(response)
+            print(f"🔍 Full LLM response: {response}")
             
-            # Process function calls
-            function_results = await self._process_function_calls(robot_response, robot_id, user_message)
+            # Extract content from the nested message structure
+            if hasattr(response, 'message') and hasattr(response.message, 'content'):
+                content = response.message.content
+            elif isinstance(response, dict) and 'message' in response:
+                content = response['message'].get('content', '')
+            else:
+                print(f"⚠️ Unexpected response structure: {response}")
+                content = str(response)
             
-            # Clean response for user (remove function call syntax)
-            clean_response = self._clean_response_for_user(robot_response)
+            # Check if content is empty or whitespace
+            if not content or not content.strip():
+                print("⚠️ LLM returned empty content! Using fallback response.")
+                return "I understand your message, but I'm having trouble generating a response right now. Could you please try rephrasing your question?"
             
-            # Store robot's response
-            store_chat_message("assistant", clean_response, conversation_id, "robot", user_id)
-            
-            result = {
-                "robot_response": clean_response,
-                "conversation_id": conversation_id,
-                "robot_id": robot_id,
-                "success": True
-            }
-            
-            # Add function call results if any
-            if function_results:
-                result.update(function_results)
-            
-            return result
+            print(f"✅ LLM content extracted successfully: {len(content)} characters")
+            return content.strip()
             
         except Exception as e:
-            print(f"❌ Robot chat error: {e}")
-            return {"error": str(e), "success": False}
+            print(f"❌ LLM call failed: {e}")
+            traceback.print_exc()
+            return "Sorry, I encountered an error while processing your request. Please try again."
 
-    async def _process_function_calls(self, response: str, robot_id: str, user_message: str) -> Dict:
-        """Process function calls from LLM response"""
-        results = {}
+    async def _generate_robot_response(self, context: Dict, intent_data: Dict, 
+                                     function_results: Dict, user_message: str, robot_id: str) -> str:
+        """Generate response for robot users"""
+        prompt = self._build_robot_prompt(robot_id, context, intent_data, function_results, user_message)
         
-        # Check for navigation command
-        nav_match = re.search(r'NAVIGATE_TO:\s*\[(.*?)\]', response)
-        if nav_match:
-            waypoints_str = nav_match.group(1)
-            waypoints = [w.strip().strip('"\'') for w in waypoints_str.split(',') if w.strip()]
-            # Validate waypoints
-            valid_waypoints = [w for w in waypoints if w in self.waypoints]
-            if valid_waypoints:
-                nav_result = await self.send_navigation_command(robot_id, valid_waypoints)
-                results['navigation_command'] = nav_result
-                print(f"🧭 Navigation command sent: {valid_waypoints}")
-        
-        # Check for alert creation
-        alert_match = re.search(r'CREATE_ALERT:\s*\[(.*?)\]', response)
-        if alert_match:
-            alert_description = alert_match.group(1).strip().strip('"\'')
-            alert_result = await self.create_stuck_alert(robot_id, alert_description)
-            results['alert_created'] = alert_result
-            print(f"🚨 Alert created: {alert_description}")
-        
-        # Auto-detect stuck condition from user message
-        if any(word in user_message.lower() for word in ['stuck', 'help', 'problem', 'error', 'cannot move']):
-            if 'alert_created' not in results:  # Don't duplicate alerts
-                alert_result = await self.create_stuck_alert(robot_id, f"User reported issue: {user_message}")
-                results['alert_created'] = alert_result
-                print(f"🚨 Auto-alert for stuck robot: {robot_id}")
-        
-        return results
+        try:
+            response = self.ollama_client.chat(
+                model=self.llm_model,
+                messages=[
+                    {"role": "user", "content": prompt}  # Changed from system to user
+                ]
+            )
+            
+            # Extract content properly
+            if hasattr(response, 'message') and hasattr(response.message, 'content'):
+                content = response.message.content
+            elif isinstance(response, dict) and 'message' in response:
+                content = response['message'].get('content', '')
+            else:
+                content = str(response)
+            
+            return content.strip() if content else "I'm sorry, I couldn't process that request."
+            
+        except Exception as e:
+            print(f"❌ Robot LLM call failed: {e}")
+            return "Sorry, I'm having trouble responding right now."
 
-    def _clean_response_for_user(self, response: str) -> str:
-        """Remove function call syntax from user-facing response"""
-        # Remove function call lines
-        response = re.sub(r'NAVIGATE_TO:\s*\[.*?\]\n?', '', response)
-        response = re.sub(r'CREATE_ALERT:\s*\[.*?\]\n?', '', response)
-        return response.strip()
+    def _build_web_prompt(self, context: Dict, intent_data: Dict, message: str) -> str:
+        """Build prompt for web users - IMPROVED"""
+        active_robots = context.get('active_robots', [])
+        robot_status = context.get('robot_status', [])
+        
+        # Build a more comprehensive prompt
+        prompt = f"""You are a helpful robot fleet monitoring assistant. Please respond naturally and conversationally to user questions about robots and system status.
+
+CURRENT SYSTEM STATUS:
+- Active Robots: {', '.join(active_robots) if active_robots else 'None currently active'}
+- Number of robots with recent telemetry: {len(robot_status)}
+- Intent detected: {intent_data.get('intent_type', 'general conversation')}
+
+USER QUESTION: "{message}"
+
+Please provide a helpful, friendly response. If the user is asking about robots, mention which ones are currently active. Keep your response conversational and informative. Always provide a complete response."""
+
+        return prompt
+
+    def _build_robot_prompt(self, robot_id: str, context: Dict, intent_data: Dict, 
+                           function_results: Dict, user_message: str) -> str:
+        """Build prompt for robot users - IMPROVED"""
+        function_info = ""
+        if function_results:
+            if 'navigation_command' in function_results:
+                nav = function_results['navigation_command']
+                if nav.get('success'):
+                    function_info = f"✅ Navigation command executed: {' -> '.join(nav.get('waypoints', []))}"
+                else:
+                    function_info = f"❌ Navigation failed: {nav.get('error', 'Unknown error')}"
+            
+            if 'alert_created' in function_results:
+                alert = function_results['alert_created']
+                function_info += f"\n🚨 Alert created (Priority: {alert.get('priority', 'MEDIUM')})"
+
+        prompt = f"""You are the assistant for Robot {robot_id}. Respond helpfully and naturally to the user.
+
+AVAILABLE WAYPOINTS: {', '.join(self.waypoints)}
+DETECTED INTENT: {intent_data.get('intent_type', 'general chat')}
+
+{function_info if function_info else ''}
+
+USER MESSAGE: "{user_message}"
+
+Please respond in a friendly, helpful manner. If navigation was requested and executed, confirm the action. Always provide a complete response."""
+
+        return prompt
 
     async def get_conversation_history(self, conversation_id: str) -> Dict[str, Any]:
         """Get conversation history by ID"""
         try:
-            messages = get_conversation_history(conversation_id)
-            return {
+            messages = await self.context_manager.db.get_conversation_history(conversation_id)
+            return success_response({
                 "conversation_id": conversation_id,
                 "messages": messages,
-                "message_count": len(messages),
-                "success": True
-            }
+                "message_count": len(messages)
+            })
         except Exception as e:
-            print(f"❌ Get conversation history error: {e}")
-            return {"error": str(e), "success": False}
-
-    # ── FUNCTION IMPLEMENTATIONS ───────────────────────────
-    async def create_stuck_alert(self, robot_id: str, message: str) -> Dict[str, Any]:
-        """Create alert when robot is stuck (placeholder for real alert system)"""
-        try:
-            alert_id = str(uuid.uuid4())
-            timestamp = datetime.now().isoformat()
-            
-            # This is where you'd integrate with your actual alert system
-            # For now, just log and return success
-            print(f"🚨 STUCK ALERT [{alert_id}] - Robot {robot_id}: {message}")
-            
-            # TODO: Integrate with actual alerting system (email, SMS, dashboard, etc.)
-            
-            return {
-                "alert_id": alert_id,
-                "robot_id": robot_id,
-                "message": message,
-                "timestamp": timestamp,
-                "status": "alert_created",
-                "success": True
-            }
-            
-        except Exception as e:
-            print(f"❌ Create alert error: {e}")
-            return {"error": str(e), "success": False}
-
-    async def send_navigation_command(self, robot_id: str, waypoints: List[str]) -> Dict[str, Any]:
-        """Send navigation command to robot (placeholder for real robot communication)"""
-        try:
-            command_id = str(uuid.uuid4())
-            timestamp = datetime.now().isoformat()
-            
-            # This is where you'd send actual commands to your robot
-            # For now, just log and return success
-            print(f"🧭 NAVIGATION COMMAND [{command_id}] - Robot {robot_id}: {' -> '.join(waypoints)}")
-            
-            # TODO: Integrate with actual robot communication system
-            
-            return {
-                "command_id": command_id,
-                "robot_id": robot_id,
-                "waypoints": waypoints,
-                "timestamp": timestamp,
-                "status": "command_sent",
-                "success": True
-            }
-            
-        except Exception as e:
-            print(f"❌ Navigation command error: {e}")
-            return {"error": str(e), "success": False}
+            return error_response(str(e))

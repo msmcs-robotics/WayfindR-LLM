@@ -1,273 +1,312 @@
 #!/usr/bin/env python3
 """
-Simple log viewer for the Robot Guidance System
-Fetches and displays logs from both PostgreSQL (chat) and Qdrant (telemetry) in a readable format
+log_viewer.py - Display logs from both PostgreSQL and Qdrant databases nicely
 """
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from qdrant_client import QdrantClient
-from datetime import datetime
+import asyncio
 import json
+from datetime import datetime
+from typing import List, Dict
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.columns import Columns
+from rich.text import Text
+from rich import box
 
-# Configuration (matching your system)
-DB_CONFIG = {
-    "dbname": "rag_db",
-    "user": "postgres", 
-    "password": "password",
-    "host": "localhost",
-    "port": "5432"
-}
+# Import your existing modules
+from db_manager import get_db_manager
+from config_manager import get_config
 
-QDRANT_HOST = "localhost"
-QDRANT_PORT = 6333
-TELEMETRY_COLLECTION = "robot_telemetry"
+console = Console()
 
-def print_header(title):
-    """Print a nice header"""
-    print("\n" + "="*60)
-    print(f" {title}")
-    print("="*60)
-
-def print_separator():
-    """Print a separator line"""
-    print("-" * 60)
-
-def get_chat_logs(limit=20):
-    """Fetch recent chat messages from PostgreSQL"""
-    try:
-        with psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT 
-                        id, role, content, timestamp, user_id, metadata
-                    FROM chat_messages 
-                    ORDER BY timestamp DESC 
-                    LIMIT %s;
-                """, (limit,))
-                
-                return cur.fetchall()
-    except Exception as e:
-        print(f"❌ Error fetching chat logs: {e}")
-        return []
-
-def get_telemetry_logs(limit=20):
-    """Fetch recent telemetry data from Qdrant"""
-    try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+class LogViewer:
+    def __init__(self):
+        self.config = get_config()
+        self.db = get_db_manager()
         
-        # Check if collection exists
-        if not client.collection_exists(TELEMETRY_COLLECTION):
-            print(f"⚠️  Collection '{TELEMETRY_COLLECTION}' does not exist")
-            return []
+    def display_postgres_logs(self, limit: int = 10):
+        """Display PostgreSQL chat logs in a nice table"""
+        console.print("\n[bold blue]📊 PostgreSQL Chat Messages[/bold blue]")
         
-        # Get recent points using scroll
-        scroll_result = client.scroll(
-            collection_name=TELEMETRY_COLLECTION,
-            limit=limit,
-            with_payload=True,
-            with_vectors=False
-        )
-        
-        return scroll_result[0]  # Return points (first element of tuple)
-        
-    except Exception as e:
-        print(f"❌ Error fetching telemetry logs: {e}")
-        return []
-
-def display_chat_logs(chat_logs):
-    """Display chat logs in a readable format"""
-    print_header("CHAT LOGS (PostgreSQL)")
-    
-    if not chat_logs:
-        print("No chat messages found.")
-        return
-    
-    print(f"📝 Found {len(chat_logs)} chat messages")
-    print()
-    
-    for i, msg in enumerate(reversed(chat_logs), 1):  # Show oldest first
-        timestamp = msg['timestamp'].strftime("%Y-%m-%d %H:%M:%S") if msg['timestamp'] else "Unknown"
-        role_emoji = {"user": "👤", "assistant": "🤖", "robot": "🦾"}.get(msg['role'], "❓")
-        
-        print(f"{i:2d}. [{timestamp}] {role_emoji} {msg['role'].upper()}")
-        if msg['user_id']:
-            print(f"    User ID: {msg['user_id']}")
-        
-        # Truncate long messages
-        content = msg['content']
-        if len(content) > 200:
-            content = content[:200] + "..."
-        
-        # Print content with indentation
-        for line in content.split('\n'):
-            print(f"    {line}")
-        
-        if msg['metadata']:
-            print(f"    📋 Metadata: {json.dumps(msg['metadata'], indent=6)}")
-        
-        print()
-
-def display_telemetry_logs(telemetry_logs):
-    """Display telemetry logs in a readable format"""
-    print_header("TELEMETRY LOGS (Qdrant)")
-    
-    if not telemetry_logs:
-        print("No telemetry data found.")
-        return
-    
-    print(f"📡 Found {len(telemetry_logs)} telemetry points")
-    print()
-    
-    # Group by robot_id and sort by timestamp
-    robot_data = {}
-    for point in telemetry_logs:
-        robot_id = point.payload.get("robot_id", "unknown")
-        if robot_id not in robot_data:
-            robot_data[robot_id] = []
-        robot_data[robot_id].append(point)
-    
-    # Sort each robot's data by timestamp
-    for robot_id in robot_data:
-        robot_data[robot_id].sort(
-            key=lambda x: x.payload.get("timestamp", ""), 
-            reverse=True
-        )
-    
-    # Display by robot
-    for robot_id, points in robot_data.items():
-        print(f"🦾 ROBOT: {robot_id}")
-        print_separator()
-        
-        for i, point in enumerate(points, 1):
-            payload = point.payload
-            telemetry = payload.get("telemetry", {})
+        try:
+            logs = self.db.get_recent_chat_logs(limit)
             
-            timestamp = payload.get("timestamp", "Unknown")
-            if timestamp != "Unknown":
-                try:
-                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                    timestamp = dt.strftime("%Y-%m-%d %H:%M:%S")
-                except:
-                    pass
+            if not logs:
+                console.print("[yellow]No chat messages found[/yellow]")
+                return
             
-            print(f"  {i:2d}. [{timestamp}]")
-            
-            # Position info
-            pos = telemetry.get("position", {})
-            exp_pos = telemetry.get("expected_position", {})
-            print(f"      📍 Position: ({pos.get('x', 0):.2f}, {pos.get('y', 0):.2f})")
-            print(f"      🎯 Expected: ({exp_pos.get('x', 0):.2f}, {exp_pos.get('y', 0):.2f})")
-            
-            # Movement info
-            speed = telemetry.get("movement_speed", 0)
-            distance = telemetry.get("distance_traveled", 0)
-            print(f"      🏃 Speed: {speed:.2f} m/s, Distance: {distance:.2f}m")
-            
-            # Navigation info
-            current_wp = telemetry.get("current_waypoint", "none")
-            target_wp = telemetry.get("target_waypoint", "none")
-            nav_status = telemetry.get("navigation_status", "unknown")
-            stuck = telemetry.get("is_stuck", False)
-            
-            status_emoji = "🔴" if stuck else "🟢"
-            print(f"      {status_emoji} Status: {nav_status}")
-            print(f"      🚩 Route: {current_wp} → {target_wp}")
-            
-            if stuck:
-                print(f"      ⚠️  ROBOT IS STUCK!")
-            
-            print()
-        
-        print()
-
-def get_system_stats():
-    """Get basic system statistics"""
-    print_header("SYSTEM STATISTICS")
-    
-    # Chat stats
-    try:
-        with psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT 
-                        COUNT(*) as total_messages,
-                        COUNT(DISTINCT user_id) as unique_users,
-                        COUNT(CASE WHEN role = 'user' THEN 1 END) as user_messages,
-                        COUNT(CASE WHEN role = 'assistant' THEN 1 END) as assistant_messages,
-                        COUNT(CASE WHEN role = 'robot' THEN 1 END) as robot_messages,
-                        MAX(timestamp) as last_message
-                    FROM chat_messages;
-                """)
-                
-                stats = dict(cur.fetchone())
-                
-                print("📊 CHAT DATABASE (PostgreSQL):")
-                print(f"   Total Messages: {stats['total_messages']}")
-                print(f"   Unique Users: {stats['unique_users']}")
-                print(f"   User Messages: {stats['user_messages']}")
-                print(f"   Assistant Messages: {stats['assistant_messages']}")
-                print(f"   Robot Messages: {stats['robot_messages']}")
-                
-                if stats['last_message']:
-                    last_msg = stats['last_message'].strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"   Last Message: {last_msg}")
-                
-    except Exception as e:
-        print(f"❌ Error getting chat stats: {e}")
-    
-    # Telemetry stats
-    try:
-        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-        
-        if client.collection_exists(TELEMETRY_COLLECTION):
-            collection_info = client.get_collection(TELEMETRY_COLLECTION)
-            
-            # Get unique robots
-            scroll_result = client.scroll(
-                collection_name=TELEMETRY_COLLECTION,
-                limit=100,
-                with_payload=True,
-                with_vectors=False
+            table = Table(
+                title=f"Recent {len(logs)} Chat Messages",
+                box=box.ROUNDED,
+                show_header=True,
+                header_style="bold magenta"
             )
             
-            unique_robots = set()
-            for point in scroll_result[0]:
-                robot_id = point.payload.get("robot_id")
-                if robot_id:
-                    unique_robots.add(robot_id)
+            table.add_column("Time", style="cyan", width=20)
+            table.add_column("Role", style="green", width=10)
+            table.add_column("User", style="blue", width=15)
+            table.add_column("Message", style="white", width=50)
+            table.add_column("Conv ID", style="dim", width=12)
             
-            print("\n📡 TELEMETRY DATABASE (Qdrant):")
-            print(f"   Total Points: {collection_info.vectors_count}")
-            print(f"   Unique Robots: {len(unique_robots)}")
-            print(f"   Robots: {', '.join(sorted(unique_robots))}")
-            print(f"   Collection Status: {collection_info.status}")
+            for log in logs:
+                timestamp = log.get('timestamp', 'Unknown')
+                if isinstance(timestamp, datetime):
+                    time_str = timestamp.strftime('%m-%d %H:%M:%S')
+                else:
+                    time_str = str(timestamp)[:19] if timestamp else 'Unknown'
+                
+                role = log.get('role', 'unknown')
+                user_info = f"{log.get('user_type', 'unknown')}/{log.get('user_id', 'unknown')}"
+                content = log.get('content', '')
+                conv_id = str(log.get('conversation_id', ''))[:10] + '...' if log.get('conversation_id') else 'None'
+                
+                # Truncate long messages
+                if len(content) > 50:
+                    content = content[:47] + "..."
+                
+                # Color code by role
+                role_style = "green" if role == "user" else "blue" if role == "assistant" else "white"
+                
+                table.add_row(
+                    time_str,
+                    f"[{role_style}]{role}[/{role_style}]",
+                    user_info,
+                    content,
+                    conv_id
+                )
             
-        else:
-            print("\n📡 TELEMETRY DATABASE (Qdrant):")
-            print("   Collection does not exist")
+            console.print(table)
             
-    except Exception as e:
-        print(f"❌ Error getting telemetry stats: {e}")
+        except Exception as e:
+            console.print(f"[red]Error fetching PostgreSQL logs: {e}[/red]")
+    
+    def display_qdrant_logs(self, limit: int = 10):
+        """Display Qdrant telemetry logs in a nice format"""
+        console.print("\n[bold green]🤖 Qdrant Telemetry Data[/bold green]")
+        
+        try:
+            logs = self.db.get_recent_telemetry_logs(limit)
+            
+            if not logs:
+                console.print("[yellow]No telemetry data found[/yellow]")
+                return
+            
+            # Group by robot for better display
+            robot_data = {}
+            for log in logs:
+                payload = log.get('payload', {})
+                robot_id = payload.get('robot_id', 'unknown')
+                
+                if robot_id not in robot_data:
+                    robot_data[robot_id] = []
+                robot_data[robot_id].append(payload)
+            
+            # Display each robot's data
+            panels = []
+            for robot_id, telemetry_list in robot_data.items():
+                latest = telemetry_list[0] if telemetry_list else {}
+                telemetry = latest.get('telemetry', {})
+                
+                # Create robot status panel
+                position = telemetry.get('position', {})
+                pos_str = f"({position.get('x', 0):.1f}, {position.get('y', 0):.1f})"
+                
+                status_lines = [
+                    f"[cyan]Position:[/cyan] {pos_str}",
+                    f"[yellow]Status:[/yellow] {telemetry.get('navigation_status', 'unknown')}",
+                    f"[green]Battery:[/green] {telemetry.get('battery_level', 'unknown')}%",
+                    f"[red]Stuck:[/red] {'Yes' if telemetry.get('is_stuck', False) else 'No'}",
+                    f"[blue]Waypoint:[/blue] {telemetry.get('current_waypoint', 'none')}",
+                    f"[dim]Last Update:[/dim] {latest.get('timestamp', 'unknown')[:19]}"
+                ]
+                
+                panel_content = "\n".join(status_lines)
+                panel = Panel(
+                    panel_content,
+                    title=f"🤖 Robot {robot_id}",
+                    border_style="green" if not telemetry.get('is_stuck', False) else "red"
+                )
+                panels.append(panel)
+            
+            # Display panels in columns
+            if panels:
+                if len(panels) <= 2:
+                    console.print(Columns(panels, equal=True, expand=True))
+                else:
+                    # Show first few in columns, rest individually
+                    console.print(Columns(panels[:2], equal=True, expand=True))
+                    for panel in panels[2:]:
+                        console.print(panel)
+            
+            # Summary table
+            table = Table(
+                title="Telemetry Summary",
+                box=box.SIMPLE,
+                show_header=True,
+                header_style="bold cyan"
+            )
+            
+            table.add_column("Robot ID", style="green")
+            table.add_column("Status", style="yellow")
+            table.add_column("Position", style="cyan")
+            table.add_column("Battery", style="blue")
+            table.add_column("Last Seen", style="dim")
+            
+            for robot_id, telemetry_list in robot_data.items():
+                latest = telemetry_list[0] if telemetry_list else {}
+                telemetry = latest.get('telemetry', {})
+                position = telemetry.get('position', {})
+                
+                table.add_row(
+                    robot_id,
+                    telemetry.get('navigation_status', 'unknown'),
+                    f"({position.get('x', 0):.1f}, {position.get('y', 0):.1f})",
+                    f"{telemetry.get('battery_level', 'unknown')}%",
+                    latest.get('timestamp', 'unknown')[:19]
+                )
+            
+            console.print("\n")
+            console.print(table)
+            
+        except Exception as e:
+            console.print(f"[red]Error fetching Qdrant logs: {e}[/red]")
+    
+    def display_system_health(self):
+        """Display system health information"""
+        console.print("\n[bold magenta]🏥 System Health[/bold magenta]")
+        
+        try:
+            health = self.db.check_system_health()
+            
+            health_table = Table(
+                title="Database Health Status",
+                box=box.ROUNDED,
+                show_header=True,
+                header_style="bold magenta"
+            )
+            
+            health_table.add_column("Component", style="cyan")
+            health_table.add_column("Status", style="green")
+            health_table.add_column("Details", style="white")
+            
+            # PostgreSQL status
+            pg_status = health.get('postgres_status', 'unknown')
+            pg_color = "green" if pg_status == "healthy" else "red"
+            health_table.add_row(
+                "PostgreSQL",
+                f"[{pg_color}]{pg_status}[/{pg_color}]",
+                f"Messages: {health.get('postgres_messages', 'unknown')}"
+            )
+            
+            # Qdrant status
+            qd_status = health.get('qdrant_status', 'unknown')
+            qd_color = "green" if qd_status == "healthy" else "red"
+            health_table.add_row(
+                "Qdrant",
+                f"[{qd_color}]{qd_status}[/{qd_color}]",
+                f"Vectors: {health.get('qdrant_vectors', 'unknown')}"
+            )
+            
+            # Overall status
+            overall = health.get('overall_status', 'unknown')
+            overall_color = "green" if overall == "healthy" else "red"
+            health_table.add_row(
+                "Overall",
+                f"[{overall_color}]{overall}[/{overall_color}]",
+                f"Checked: {health.get('timestamp', 'unknown')[:19]}"
+            )
+            
+            console.print(health_table)
+            
+        except Exception as e:
+            console.print(f"[red]Error checking system health: {e}[/red]")
+    
+    def display_active_robots(self):
+        """Display active robots summary"""
+        console.print("\n[bold yellow]🤖 Active Robots[/bold yellow]")
+        
+        try:
+            active_robots = self.db.get_active_robots(hours=24)
+            
+            if not active_robots:
+                console.print("[yellow]No active robots found in the last 24 hours[/yellow]")
+                return
+            
+            console.print(f"[green]Found {len(active_robots)} active robots:[/green]")
+            
+            for i, robot_id in enumerate(sorted(active_robots), 1):
+                console.print(f"  {i}. [cyan]{robot_id}[/cyan]")
+            
+        except Exception as e:
+            console.print(f"[red]Error getting active robots: {e}[/red]")
+    
+    async def run_interactive(self):
+        """Run interactive log viewer"""
+        console.print("[bold blue]🔍 Interactive Log Viewer[/bold blue]")
+        console.print("Commands: [cyan]postgres[/cyan], [cyan]qdrant[/cyan], [cyan]health[/cyan], [cyan]robots[/cyan], [cyan]all[/cyan], [cyan]quit[/cyan]")
+        
+        while True:
+            try:
+                command = console.input("\n[bold]Enter command: [/bold]").strip().lower()
+                
+                if command in ['quit', 'exit', 'q']:
+                    console.print("[yellow]Goodbye! 👋[/yellow]")
+                    break
+                elif command in ['postgres', 'pg']:
+                    self.display_postgres_logs()
+                elif command in ['qdrant', 'qd']:
+                    self.display_qdrant_logs()
+                elif command in ['health', 'h']:
+                    self.display_system_health()
+                elif command in ['robots', 'r']:
+                    self.display_active_robots()
+                elif command in ['all', 'a']:
+                    self.display_system_health()
+                    self.display_active_robots()
+                    self.display_postgres_logs()
+                    self.display_qdrant_logs()
+                else:
+                    console.print(f"[red]Unknown command: {command}[/red]")
+                    console.print("Available: [cyan]postgres, qdrant, health, robots, all, quit[/cyan]")
+                    
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Exiting... 👋[/yellow]")
+                break
+            except Exception as e:
+                console.print(f"[red]Error: {e}[/red]")
 
 def main():
-    """Main function to display all logs"""
-    print("🔍 Robot Guidance System - Log Viewer")
-    print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # Get system statistics
-    get_system_stats()
-    
-    # Get and display chat logs
-    chat_logs = get_chat_logs(limit=20)
-    display_chat_logs(chat_logs)
-    
-    # Get and display telemetry logs
-    telemetry_logs = get_telemetry_logs(limit=20)
-    display_telemetry_logs(telemetry_logs)
-    
-    print_header("LOG VIEWING COMPLETE")
-    print("💡 Tip: Run with 'python log_viewer.py' to refresh logs")
+    """Main entry point"""
+    try:
+        viewer = LogViewer()
+        
+        # Check if running interactively
+        import sys
+        if len(sys.argv) > 1:
+            command = sys.argv[1].lower()
+            if command in ['postgres', 'pg']:
+                viewer.display_postgres_logs()
+            elif command in ['qdrant', 'qd']:
+                viewer.display_qdrant_logs()
+            elif command in ['health', 'h']:
+                viewer.display_system_health()
+            elif command in ['robots', 'r']:
+                viewer.display_active_robots()
+            elif command in ['all', 'a']:
+                viewer.display_system_health()
+                viewer.display_active_robots()
+                viewer.display_postgres_logs()
+                viewer.display_qdrant_logs()
+            else:
+                console.print(f"[red]Unknown command: {command}[/red]")
+                console.print("Usage: python log_viewer.py [postgres|qdrant|health|robots|all]")
+        else:
+            # Interactive mode
+            asyncio.run(viewer.run_interactive())
+            
+    except Exception as e:
+        console.print(f"[red]Failed to start log viewer: {e}[/red]")
 
 if __name__ == "__main__":
     main()

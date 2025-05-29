@@ -4,12 +4,61 @@ document.addEventListener('DOMContentLoaded', () => {
     const postgresContainer = document.getElementById('postgres-container');
     const messageForm = document.getElementById('message-form');
     const messageInput = document.getElementById('message-input');
+    const healthButton = document.getElementById("health-button");
+    const healthStatus = document.getElementById("health-status");
 
     const qdrantLoading = document.getElementById('qdrant-loading');
     const postgresLoading = document.getElementById('postgres-loading');
 
     const seenQdrantIds = new Set();
     const seenPostgresIds = new Set();
+
+    // Create health overlay
+    const healthOverlay = document.createElement('div');
+    healthOverlay.id = 'health-overlay';
+    healthOverlay.innerHTML = `
+    <div class="health-content">
+        <div class="health-header">
+        <h3>System Health</h3>
+        <button class="close-button">&times;</button>
+        </div>
+        <pre id="health-data">Loading health data...</pre>
+    </div>`;
+    document.body.appendChild(healthOverlay);
+
+    // Health check functionality
+    if (healthButton) {
+        healthButton.addEventListener('click', async () => {
+            console.log("Health button clicked");
+            try {
+                // Show overlay immediately
+                healthOverlay.style.display = 'flex';
+                document.getElementById('health-data').textContent = "Loading...";
+                
+                const response = await fetch('/health');
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('health-data').textContent = 
+                        JSON.stringify(data.data, null, 2);
+                } else {
+                    document.getElementById('health-data').textContent = 
+                        `Error: ${data.error}`;
+                }
+            } catch (err) {
+                document.getElementById('health-data').textContent = 
+                    `Network error: ${err.message}`;
+            }
+        });
+    }
+
+    document.getElementById('health-button').addEventListener('click', () => {
+        healthOverlay.style.display = 'flex'; // Use flex display
+    });
+
+    document.querySelector('.close-button').addEventListener('click', () => {
+        healthOverlay.style.display = 'none';
+    });
 
     function createDiv(classes = [], text = '') {
         const div = document.createElement('div');
@@ -35,19 +84,15 @@ document.addEventListener('DOMContentLoaded', () => {
     function addQdrantLog(record) {
         if (seenQdrantIds.has(record.id)) return;
 
-        console.log("Adding Qdrant record:", record); // Debug log
-
         const logDiv = createDiv(['log-message', 'qdrant-record']);
-        
-        // Handle the payload formatting
         let payloadDisplay = '';
+
         try {
             if (record.payload) {
-                // Extract relevant telemetry info for display
                 const telemetry = record.payload.telemetry || {};
                 const robotId = record.payload.robot_id || 'Unknown';
                 const timestamp = record.payload.timestamp || 'Unknown';
-                
+
                 payloadDisplay = JSON.stringify({
                     robot_id: robotId,
                     timestamp: timestamp,
@@ -59,7 +104,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 payloadDisplay = 'No payload data';
             }
         } catch (e) {
-            console.error("Error formatting Qdrant payload:", e);
             payloadDisplay = 'Error formatting payload: ' + e.message;
         }
 
@@ -81,20 +125,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const id = log[0];
         if (seenPostgresIds.has(id)) return;
 
-        console.log("Adding Postgres log:", log, logType); // Debug log
-
         const logDiv = createDiv(['log-message', `${logType}-record`]);
         const content = logType === 'relationship' ? log[2] : log[1];
 
-        // Format timestamp
         let timestamp = 'Unknown';
         try {
             if (log[3]) {
                 timestamp = new Date(log[3]).toLocaleString();
             }
-        } catch (e) {
-            console.error("Error parsing timestamp:", e);
-        }
+        } catch (e) {}
 
         logDiv.innerHTML = `
             <div class="log-header">
@@ -116,11 +155,8 @@ document.addEventListener('DOMContentLoaded', () => {
         qdrantLoading.classList.add('loading-active');
 
         try {
-            console.log("Fetching Qdrant logs..."); // Debug log
             const response = await fetch('/qdrant_logs');
             const data = await response.json();
-            
-            console.log("Qdrant response:", data); // Debug log
 
             if (data.status === 'error') {
                 qdrantLoading.textContent = `Error: ${data.error}`;
@@ -128,16 +164,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            if (data.records && Array.isArray(data.records)) {
-                console.log(`Processing ${data.records.length} Qdrant records`);
-                data.records.forEach(record => addQdrantLog(record));
-                qdrantLoading.textContent = `${data.records.length} Qdrant records loaded`;
-            } else {
-                console.log("No records found in Qdrant response");
-                qdrantLoading.textContent = "No Qdrant records found";
-            }
+            (data.records || []).forEach(addQdrantLog);
+            qdrantLoading.textContent = `${data.records?.length || 0} Qdrant records loaded`;
+
         } catch (e) {
-            console.error("Qdrant load error:", e);
             qdrantLoading.textContent = `Error: ${e.message}`;
             qdrantLoading.classList.add('error');
         } finally {
@@ -150,11 +180,8 @@ document.addEventListener('DOMContentLoaded', () => {
         postgresLoading.classList.add('loading-active');
 
         try {
-            console.log("Fetching Postgres logs..."); // Debug log
             const response = await fetch('/postgres_logs');
             const data = await response.json();
-
-            console.log("Postgres response:", data); // Debug log
 
             if (data.status === 'error') {
                 postgresLoading.textContent = `Error: ${data.error}`;
@@ -165,23 +192,20 @@ document.addEventListener('DOMContentLoaded', () => {
             let relationshipCount = 0;
             let messageCount = 0;
 
-            if (data.relationships && Array.isArray(data.relationships)) {
-                console.log(`Processing ${data.relationships.length} relationship records`);
-                data.relationships.forEach(log => addPostgresLog(log, 'relationship'));
-                relationshipCount = data.relationships.length;
-            }
-            
-            if (data.message_chains && Array.isArray(data.message_chains)) {
-                console.log(`Processing ${data.message_chains.length} message chain records`);
-                data.message_chains.forEach(log => addPostgresLog(log, 'message'));
-                messageCount = data.message_chains.length;
-            }
+            (data.relationships || []).forEach(log => {
+                addPostgresLog(log, 'relationship');
+                relationshipCount++;
+            });
+
+            (data.message_chains || []).forEach(log => {
+                addPostgresLog(log, 'message');
+                messageCount++;
+            });
 
             postgresLoading.textContent =
                 `${relationshipCount} relationships, ${messageCount} message chains loaded`;
-                
+
         } catch (e) {
-            console.error("PostgreSQL load error:", e);
             postgresLoading.textContent = `Error: ${e.message}`;
             postgresLoading.classList.add('error');
         } finally {
@@ -196,7 +220,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const loadingIndicator = addMessage("Processing...", 'bot', 'loading');
 
         try {
-            const response = await fetch('/llm_command', {
+            const response = await fetch('/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ message: userInput })
@@ -205,14 +229,15 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
             chatContainer.removeChild(loadingIndicator);
 
-            const style = data.success ? 'success' : 'error';
-            addMessage(data.response, 'bot', style);
-
-            // Refresh logs after successful command
-            setTimeout(() => {
-                loadQdrantLogs();
-                loadPostgresLogs();
-            }, 1000);
+            if (data.success) {
+                addMessage(data.data.response, 'bot', 'success');
+                setTimeout(() => {
+                    loadQdrantLogs();
+                    loadPostgresLogs();
+                }, 1000);
+            } else {
+                addMessage(`Error: ${data.error}`, 'bot', 'error');
+            }
         } catch (err) {
             chatContainer.removeChild(loadingIndicator);
             addMessage(`Error: ${err.message}`, 'bot', 'error');
@@ -228,22 +253,15 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     function startPolling() {
-        console.log("Starting log polling..."); // Debug log
-        
-        // Initial load
         loadQdrantLogs();
         loadPostgresLogs();
 
-        // Set up polling interval
         const interval = setInterval(() => {
-            console.log("Polling for new logs..."); // Debug log
             loadQdrantLogs();
             loadPostgresLogs();
-        }, 5000); // Increased to 5 seconds to reduce server load
+        }, 5000);
 
-        // Clean up interval on page unload
         window.addEventListener('beforeunload', () => {
-            console.log("Cleaning up polling interval");
             clearInterval(interval);
         });
     }

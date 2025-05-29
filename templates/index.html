@@ -24,12 +24,16 @@
 
         <!-- Right side: Chat Container -->
         <div id="chat-container">
-            <h2>Agent Chat</h2>
+            <h2>User Chat</h2>
             <div id="chat-chat-container"></div>
-            <form id="message-form">
-                <input type="text" id="message-input" placeholder="Type your message..." required>
-                <button type="submit">Send</button>
-            </form>
+            <div id="form-container">
+                <form id="message-form">
+                    <input type="text" id="message-input" placeholder="Type your message..." required>
+                    <button type="submit">Send</button>
+                    <button type="button" id="health-button">Check Health</button>
+                </form>
+            </div>
+            <div id="health-status" style="margin-top: 5px;"></div>
         </div>
     </div>
 
