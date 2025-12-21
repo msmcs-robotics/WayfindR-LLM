@@ -78,29 +78,30 @@
             <div id="qdrant-loading" class="loading-indicator">Ready to stream</div>
         </div>
 
-        <!-- Right Column: Chat Interface -->
+        <!-- Right Column: Operator Console -->
         <div class="data-column" id="chat-column">
             <div class="column-header">
-                <h2>Tour Guide Chat</h2>
+                <h2>Operator Console</h2>
                 <div class="column-controls">
                     <button id="clear-chat" class="control-btn">Clear</button>
                 </div>
             </div>
             <div id="chat-container" class="data-container">
                 <div class="welcome-message">
-                    <h3>Welcome to WayfindR</h3>
-                    <p>I'm your tour guide assistant. Try asking:</p>
+                    <h3>WayfindR Operator Console</h3>
+                    <p>Manage your robot fleet. Try commands like:</p>
                     <ul>
-                        <li>"Take me to the cafeteria"</li>
-                        <li>"Where is the conference hall?"</li>
-                        <li>"What is the robot's status?"</li>
-                        <li>"Help, I'm lost"</li>
+                        <li>"Show status of all robots"</li>
+                        <li>"Send robot_01 to the cafeteria"</li>
+                        <li>"Make robot_01 announce 'Tours starting soon'"</li>
+                        <li>"Recall all robots to charging"</li>
+                        <li>"Generate system report"</li>
                     </ul>
                 </div>
             </div>
             <form id="message-form">
                 <input type="text" id="message-input"
-                       placeholder="Ask me anything about the building..."
+                       placeholder="Enter command or ask about robot status..."
                        required autocomplete="off">
                 <button type="submit">Send</button>
             </form>

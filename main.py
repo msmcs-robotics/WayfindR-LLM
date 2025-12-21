@@ -24,6 +24,26 @@ from api.streaming import (
     get_postgresql_data,
     get_qdrant_data
 )
+from api.map_handler import (
+    get_floors,
+    get_floor_details,
+    get_waypoints,
+    get_waypoint,
+    create_waypoint,
+    update_waypoint,
+    delete_waypoint,
+    block_waypoint,
+    unblock_waypoint,
+    get_zones,
+    get_blocked_zones,
+    create_zone,
+    create_blocked_zone,
+    update_zone,
+    delete_zone,
+    activate_zone,
+    deactivate_zone,
+    get_map_state_for_robot
+)
 
 # Initialize LLM
 print("[MCP] Initializing LLM...")
@@ -78,6 +98,31 @@ async def index(request: Request):
         return templates.TemplateResponse("index.html", {"request": request})
     except Exception as e:
         error_msg = f"ERROR: Could not render template: {e}"
+        print(error_msg)
+        return HTMLResponse(content=f"<html><body>{error_msg}</body></html>", status_code=500)
+
+
+@app.get("/diagnostics/{robot_id}", response_class=HTMLResponse)
+async def robot_diagnostics(request: Request, robot_id: str):
+    """Serve robot diagnostics page"""
+    try:
+        return templates.TemplateResponse("diagnostics.html", {
+            "request": request,
+            "robot_id": robot_id
+        })
+    except Exception as e:
+        error_msg = f"ERROR: Could not render diagnostics template: {e}"
+        print(error_msg)
+        return HTMLResponse(content=f"<html><body>{error_msg}</body></html>", status_code=500)
+
+
+@app.get("/map", response_class=HTMLResponse)
+async def map_view(request: Request):
+    """Serve live map monitoring page"""
+    try:
+        return templates.TemplateResponse("map.html", {"request": request})
+    except Exception as e:
+        error_msg = f"ERROR: Could not render map template: {e}"
         print(error_msg)
         return HTMLResponse(content=f"<html><body>{error_msg}</body></html>", status_code=500)
 
@@ -195,6 +240,201 @@ async def telemetry_status(robot_id: str = None):
 async def telemetry_history(robot_id: str, limit: int = 10):
     """Get robot telemetry history"""
     return await get_robot_history(robot_id, limit)
+
+
+# =============================================================================
+# ROBOT MONITORING ENDPOINTS
+# =============================================================================
+
+@app.get("/robots")
+async def list_robots():
+    """
+    List all registered robots in the system
+    Robots are auto-registered when they send telemetry
+    """
+    try:
+        from rag.qdrant_store import get_latest_telemetry
+        all_telemetry = get_latest_telemetry()
+
+        robots = []
+        for robot_id, telemetry in all_telemetry.items():
+            robots.append({
+                "robot_id": robot_id,
+                "status": telemetry.get("status", "unknown"),
+                "battery": telemetry.get("battery", "N/A"),
+                "location": telemetry.get("current_location", "N/A"),
+                "last_seen": telemetry.get("timestamp", "N/A")
+            })
+
+        return {
+            "success": True,
+            "count": len(robots),
+            "robots": robots
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e), "robots": []}
+
+
+@app.get("/robots/{robot_id}")
+async def get_robot(robot_id: str):
+    """
+    Get details for a specific robot
+    """
+    try:
+        from rag.qdrant_store import get_robot_telemetry_history, get_latest_telemetry
+
+        # Get latest status
+        all_telemetry = get_latest_telemetry(robot_id)
+        if robot_id not in all_telemetry:
+            return {"success": False, "error": f"Robot {robot_id} not found"}
+
+        latest = all_telemetry[robot_id]
+
+        # Get recent history
+        history = get_robot_telemetry_history(robot_id, limit=5)
+
+        return {
+            "success": True,
+            "robot_id": robot_id,
+            "current": {
+                "status": latest.get("status", "unknown"),
+                "battery": latest.get("battery", "N/A"),
+                "location": latest.get("current_location", "N/A"),
+                "destination": latest.get("destination", None),
+                "last_update": latest.get("timestamp", "N/A")
+            },
+            "recent_history": history
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# =============================================================================
+# MAP AND ZONE ENDPOINTS
+# =============================================================================
+
+@app.get("/map/floors")
+async def list_floors():
+    """Get all floors in the building"""
+    return await get_floors()
+
+
+@app.get("/map/floors/{floor_id}")
+async def get_floor(floor_id: str):
+    """Get detailed floor information"""
+    return await get_floor_details(floor_id)
+
+
+@app.get("/map/waypoints")
+async def list_waypoints(floor_id: str = None, accessible_only: bool = True):
+    """Get all waypoints"""
+    return await get_waypoints(floor_id, accessible_only)
+
+
+@app.get("/map/waypoints/{waypoint_id}")
+async def get_single_waypoint(waypoint_id: str):
+    """Get a specific waypoint"""
+    return await get_waypoint(waypoint_id)
+
+
+@app.post("/map/waypoints")
+async def add_waypoint(request: Request):
+    """Create a new waypoint"""
+    data = await request.json()
+    return await create_waypoint(data)
+
+
+@app.put("/map/waypoints/{waypoint_id}")
+async def modify_waypoint(waypoint_id: str, request: Request):
+    """Update a waypoint"""
+    updates = await request.json()
+    return await update_waypoint(waypoint_id, updates)
+
+
+@app.delete("/map/waypoints/{waypoint_id}")
+async def remove_waypoint(waypoint_id: str):
+    """Delete a waypoint"""
+    return await delete_waypoint(waypoint_id)
+
+
+@app.post("/map/waypoints/{waypoint_id}/block")
+async def block_single_waypoint(waypoint_id: str, request: Request):
+    """Block a waypoint (make inaccessible)"""
+    data = await request.json()
+    reason = data.get("reason", "Blocked by operator")
+    return await block_waypoint(waypoint_id, reason)
+
+
+@app.post("/map/waypoints/{waypoint_id}/unblock")
+async def unblock_single_waypoint(waypoint_id: str):
+    """Unblock a waypoint"""
+    return await unblock_waypoint(waypoint_id)
+
+
+@app.get("/map/zones")
+async def list_zones(floor_id: str = None, active_only: bool = True, zone_type: str = None):
+    """Get all zones"""
+    return await get_zones(floor_id, active_only, zone_type)
+
+
+@app.get("/map/zones/blocked")
+async def list_blocked_zones(floor_id: str = None):
+    """Get all blocked zones"""
+    return await get_blocked_zones(floor_id)
+
+
+@app.post("/map/zones")
+async def add_zone(request: Request):
+    """Create a new zone"""
+    data = await request.json()
+    return await create_zone(data)
+
+
+@app.post("/map/zones/blocked")
+async def add_blocked_zone(request: Request):
+    """Quick create a blocked zone"""
+    data = await request.json()
+    return await create_blocked_zone(
+        name=data.get("name", "Blocked Area"),
+        floor_id=data.get("floor_id", "floor_1"),
+        polygon=data.get("polygon", []),
+        reason=data.get("reason", ""),
+        expires_at=data.get("expires_at")
+    )
+
+
+@app.put("/map/zones/{zone_id}")
+async def modify_zone(zone_id: str, request: Request):
+    """Update a zone"""
+    updates = await request.json()
+    return await update_zone(zone_id, updates)
+
+
+@app.delete("/map/zones/{zone_id}")
+async def remove_zone(zone_id: str):
+    """Delete a zone"""
+    return await delete_zone(zone_id)
+
+
+@app.post("/map/zones/{zone_id}/activate")
+async def activate_single_zone(zone_id: str):
+    """Activate a zone"""
+    return await activate_zone(zone_id)
+
+
+@app.post("/map/zones/{zone_id}/deactivate")
+async def deactivate_single_zone(zone_id: str):
+    """Deactivate a zone"""
+    return await deactivate_zone(zone_id)
+
+
+@app.get("/map/state/{robot_id}")
+async def get_robot_map_state(robot_id: str, floor_id: str = None):
+    """
+    Get current map state for a robot
+    Returns accessible waypoints, blocked zones, etc.
+    """
+    return await get_map_state_for_robot(robot_id, floor_id)
 
 
 # =============================================================================

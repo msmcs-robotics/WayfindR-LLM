@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Map - WayfindR</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='css/base.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='css/header.css') }}">
+    <style>
+        .map-container {
+            display: flex;
+            height: calc(100vh - 80px);
+        }
+
+        /* Left sidebar - controls */
+        .sidebar {
+            width: 280px;
+            background: #1a1a2e;
+            padding: 1rem;
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+
+        .sidebar h3 {
+            margin: 0 0 1rem 0;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #374151;
+        }
+
+        .floor-selector {
+            margin-bottom: 1rem;
+        }
+
+        .floor-selector select {
+            width: 100%;
+            padding: 0.5rem;
+            background: #16162a;
+            border: 1px solid #374151;
+            color: white;
+            border-radius: 4px;
+        }
+
+        .robot-list {
+            margin-bottom: 1rem;
+        }
+
+        .robot-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem;
+            background: #16162a;
+            border-radius: 4px;
+            margin-bottom: 0.5rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .robot-item:hover {
+            background: #252540;
+        }
+
+        .robot-item.selected {
+            background: #3b82f6;
+        }
+
+        .robot-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #4ade80;
+        }
+
+        .robot-dot.offline { background: #ef4444; }
+        .robot-dot.navigating { background: #f59e0b; }
+
+        .robot-name {
+            flex: 1;
+            font-size: 0.875rem;
+        }
+
+        .robot-battery {
+            font-size: 0.75rem;
+            color: #9ca3af;
+        }
+
+        .zone-controls {
+            margin-bottom: 1rem;
+        }
+
+        .zone-btn {
+            width: 100%;
+            padding: 0.5rem;
+            margin-bottom: 0.5rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .zone-btn.blocked { background: #ef4444; color: white; }
+        .zone-btn.priority { background: #f59e0b; color: white; }
+        .zone-btn.cancel { background: #374151; color: white; }
+
+        .active-zones {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .zone-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem;
+            background: #16162a;
+            border-radius: 4px;
+            margin-bottom: 0.5rem;
+            font-size: 0.875rem;
+        }
+
+        .zone-item.blocked { border-left: 3px solid #ef4444; }
+        .zone-item.priority { border-left: 3px solid #f59e0b; }
+
+        .zone-delete {
+            background: none;
+            border: none;
+            color: #ef4444;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+
+        /* Main map area */
+        .map-area {
+            flex: 1;
+            position: relative;
+            background: #0f0f1a;
+            overflow: hidden;
+        }
+
+        .map-canvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Right panel - robot info */
+        .info-panel {
+            width: 300px;
+            background: #1a1a2e;
+            padding: 1rem;
+            overflow-y: auto;
+            flex-shrink: 0;
+            display: none;
+        }
+
+        .info-panel.visible {
+            display: block;
+        }
+
+        .info-panel h3 {
+            margin: 0 0 1rem 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .close-panel {
+            background: none;
+            border: none;
+            color: #9ca3af;
+            cursor: pointer;
+            font-size: 1.5rem;
+        }
+
+        .info-section {
+            margin-bottom: 1rem;
+            padding: 0.75rem;
+            background: #16162a;
+            border-radius: 4px;
+        }
+
+        .info-label {
+            font-size: 0.75rem;
+            color: #9ca3af;
+            margin-bottom: 0.25rem;
+        }
+
+        .info-value {
+            font-weight: 500;
+        }
+
+        .path-display {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .path-node {
+            background: #374151;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.875rem;
+        }
+
+        .path-arrow {
+            color: #9ca3af;
+        }
+
+        .action-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .action-btn {
+            padding: 0.5rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .action-btn.primary { background: #3b82f6; color: white; }
+        .action-btn.secondary { background: #374151; color: white; }
+        .action-btn.danger { background: #ef4444; color: white; }
+
+        /* Map legend */
+        .map-legend {
+            position: absolute;
+            bottom: 1rem;
+            left: 1rem;
+            background: rgba(26, 26, 46, 0.9);
+            padding: 0.75rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 2px;
+        }
+
+        /* Drawing mode indicator */
+        .drawing-mode {
+            position: absolute;
+            top: 1rem;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #ef4444;
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            display: none;
+        }
+
+        .drawing-mode.active {
+            display: block;
+        }
+
+        .back-link {
+            color: #3b82f6;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <div style="display: flex; align-items: center; gap: 2rem;">
+            <h1>Live Map Monitoring</h1>
+        </div>
+        <div style="display: flex; align-items: center; gap: 1rem;">
+            <span id="update-status">Updating...</span>
+            <a href="/" class="action-btn secondary">Back to Dashboard</a>
+        </div>
+    </div>
+
+    <div class="map-container">
+        <!-- Left Sidebar -->
+        <div class="sidebar">
+            <a href="/" class="back-link">&larr; Dashboard</a>
+
+            <!-- Floor Selector -->
+            <div class="floor-selector">
+                <h3>Floor</h3>
+                <select id="floor-select" onchange="changeFloor()">
+                    <option value="floor_1">Ground Floor</option>
+                </select>
+            </div>
+
+            <!-- Robot List -->
+            <div class="robot-list">
+                <h3>Robots (<span id="robot-count">0</span>)</h3>
+                <div id="robot-list-container">
+                    <div style="color: #9ca3af; font-size: 0.875rem;">Loading...</div>
+                </div>
+            </div>
+
+            <!-- Zone Controls -->
+            <div class="zone-controls">
+                <h3>Zone Tools</h3>
+                <button class="zone-btn blocked" onclick="startDrawingZone('blocked')">
+                    + Add Blocked Zone
+                </button>
+                <button class="zone-btn priority" onclick="startDrawingZone('priority')">
+                    + Add Priority Zone
+                </button>
+                <button class="zone-btn cancel" onclick="cancelDrawing()" style="display: none;" id="cancel-btn">
+                    Cancel Drawing
+                </button>
+            </div>
+
+            <!-- Active Zones -->
+            <div class="active-zones">
+                <h3>Active Zones</h3>
+                <div id="zone-list-container">
+                    <div style="color: #9ca3af; font-size: 0.875rem;">No active zones</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Map Area -->
+        <div class="map-area">
+            <canvas id="map-canvas" class="map-canvas"></canvas>
+
+            <div class="drawing-mode" id="drawing-indicator">
+                Click to add points. Double-click to complete zone.
+            </div>
+
+            <div class="map-legend">
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #4ade80; border-radius: 50%;"></div>
+                    <span>Robot (Idle)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #f59e0b; border-radius: 50%;"></div>
+                    <span>Robot (Moving)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #3b82f6;"></div>
+                    <span>Waypoint</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: rgba(239, 68, 68, 0.5);"></div>
+                    <span>Blocked Zone</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: rgba(245, 158, 11, 0.3);"></div>
+                    <span>Priority Zone</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Info Panel -->
+        <div class="info-panel" id="info-panel">
+            <h3>
+                <span id="selected-robot-name">Robot Info</span>
+                <button class="close-panel" onclick="closeInfoPanel()">&times;</button>
+            </h3>
+
+            <div class="info-section">
+                <div class="info-label">Status</div>
+                <div class="info-value" id="info-status">--</div>
+            </div>
+
+            <div class="info-section">
+                <div class="info-label">Battery</div>
+                <div class="info-value" id="info-battery">--%</div>
+            </div>
+
+            <div class="info-section">
+                <div class="info-label">Location</div>
+                <div class="info-value" id="info-location">--</div>
+            </div>
+
+            <div class="info-section">
+                <div class="info-label">Current Path</div>
+                <div class="path-display" id="info-path">
+                    <span style="color: #9ca3af;">No active path</span>
+                </div>
+            </div>
+
+            <div class="info-section">
+                <div class="info-label">Last Update</div>
+                <div class="info-value" id="info-last-update">--</div>
+            </div>
+
+            <div class="action-buttons">
+                <a class="action-btn primary" id="diagnostics-link" href="#">
+                    View Full Diagnostics
+                </a>
+                <button class="action-btn secondary" onclick="sendSelectedToLocation()">
+                    Send to Location
+                </button>
+                <button class="action-btn danger" onclick="recallSelected()">
+                    Recall to Charging
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let currentFloor = 'floor_1';
+        let robots = {};
+        let waypoints = {};
+        let zones = [];
+        let selectedRobot = null;
+        let drawingMode = null;
+        let drawingPoints = [];
+
+        // Canvas
+        const canvas = document.getElementById('map-canvas');
+        const ctx = canvas.getContext('2d');
+
+        // Map dimensions (will be updated from API)
+        let mapWidth = 100;
+        let mapHeight = 80;
+
+        function resizeCanvas() {
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            render();
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Coordinate conversion
+        function mapToCanvas(x, y) {
+            const padding = 40;
+            const scaleX = (canvas.width - padding * 2) / mapWidth;
+            const scaleY = (canvas.height - padding * 2) / mapHeight;
+            return {
+                x: padding + x * scaleX,
+                y: padding + y * scaleY
+            };
+        }
+
+        function canvasToMap(cx, cy) {
+            const padding = 40;
+            const scaleX = (canvas.width - padding * 2) / mapWidth;
+            const scaleY = (canvas.height - padding * 2) / mapHeight;
+            return {
+                x: (cx - padding) / scaleX,
+                y: (cy - padding) / scaleY
+            };
+        }
+
+        // Rendering
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw grid
+            drawGrid();
+
+            // Draw zones
+            zones.forEach(zone => drawZone(zone));
+
+            // Draw drawing-in-progress zone
+            if (drawingMode && drawingPoints.length > 0) {
+                drawZonePreview();
+            }
+
+            // Draw waypoints
+            Object.values(waypoints).forEach(wp => drawWaypoint(wp));
+
+            // Draw connections between waypoints
+            Object.values(waypoints).forEach(wp => {
+                if (wp.connections) {
+                    wp.connections.forEach(connId => {
+                        const target = waypoints[connId];
+                        if (target) {
+                            drawConnection(wp, target);
+                        }
+                    });
+                }
+            });
+
+            // Draw robots
+            Object.values(robots).forEach(robot => drawRobot(robot));
+        }
+
+        function drawGrid() {
+            ctx.strokeStyle = '#1a1a2e';
+            ctx.lineWidth = 1;
+
+            // Vertical lines
+            for (let x = 0; x <= mapWidth; x += 10) {
+                const pos = mapToCanvas(x, 0);
+                const end = mapToCanvas(x, mapHeight);
+                ctx.beginPath();
+                ctx.moveTo(pos.x, pos.y);
+                ctx.lineTo(end.x, end.y);
+                ctx.stroke();
+            }
+
+            // Horizontal lines
+            for (let y = 0; y <= mapHeight; y += 10) {
+                const pos = mapToCanvas(0, y);
+                const end = mapToCanvas(mapWidth, y);
+                ctx.beginPath();
+                ctx.moveTo(pos.x, pos.y);
+                ctx.lineTo(end.x, end.y);
+                ctx.stroke();
+            }
+        }
+
+        function drawWaypoint(wp) {
+            const pos = mapToCanvas(wp.position.x, wp.position.y);
+
+            ctx.fillStyle = wp.accessible !== false ? '#3b82f6' : '#6b7280';
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, 8, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Label
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(wp.name, pos.x, pos.y + 20);
+        }
+
+        function drawConnection(from, to) {
+            const start = mapToCanvas(from.position.x, from.position.y);
+            const end = mapToCanvas(to.position.x, to.position.y);
+
+            ctx.strokeStyle = '#374151';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(start.x, start.y);
+            ctx.lineTo(end.x, end.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function drawZone(zone) {
+            if (zone.polygon.length < 3) return;
+
+            const color = zone.zone_type === 'blocked' ? 'rgba(239, 68, 68, 0.3)' : 'rgba(245, 158, 11, 0.2)';
+            const borderColor = zone.zone_type === 'blocked' ? '#ef4444' : '#f59e0b';
+
+            ctx.fillStyle = color;
+            ctx.strokeStyle = borderColor;
+            ctx.lineWidth = 2;
+
+            ctx.beginPath();
+            const first = mapToCanvas(zone.polygon[0].x, zone.polygon[0].y);
+            ctx.moveTo(first.x, first.y);
+
+            zone.polygon.slice(1).forEach(point => {
+                const pos = mapToCanvas(point.x, point.y);
+                ctx.lineTo(pos.x, pos.y);
+            });
+
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+        }
+
+        function drawZonePreview() {
+            if (drawingPoints.length === 0) return;
+
+            const color = drawingMode === 'blocked' ? 'rgba(239, 68, 68, 0.5)' : 'rgba(245, 158, 11, 0.5)';
+
+            ctx.fillStyle = color;
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2;
+
+            ctx.beginPath();
+            const first = mapToCanvas(drawingPoints[0].x, drawingPoints[0].y);
+            ctx.moveTo(first.x, first.y);
+
+            drawingPoints.slice(1).forEach(point => {
+                const pos = mapToCanvas(point.x, point.y);
+                ctx.lineTo(pos.x, pos.y);
+            });
+
+            if (drawingPoints.length > 2) {
+                ctx.closePath();
+                ctx.fill();
+            }
+            ctx.stroke();
+
+            // Draw points
+            drawingPoints.forEach(point => {
+                const pos = mapToCanvas(point.x, point.y);
+                ctx.fillStyle = '#ffffff';
+                ctx.beginPath();
+                ctx.arc(pos.x, pos.y, 5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function drawRobot(robot) {
+            const wp = waypoints[robot.location];
+            if (!wp) return;
+
+            const pos = mapToCanvas(wp.position.x, wp.position.y);
+
+            // Robot circle
+            const isSelected = selectedRobot === robot.robot_id;
+            const color = robot.status === 'navigating' ? '#f59e0b' :
+                          robot.status === 'offline' ? '#ef4444' : '#4ade80';
+
+            if (isSelected) {
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(pos.x, pos.y, 18, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, 14, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Robot ID
+            ctx.fillStyle = '#000000';
+            ctx.font = 'bold 10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(robot.robot_id.replace('robot_', 'R'), pos.x, pos.y);
+        }
+
+        // Event handlers
+        canvas.addEventListener('click', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const cx = e.clientX - rect.left;
+            const cy = e.clientY - rect.top;
+
+            if (drawingMode) {
+                const mapPos = canvasToMap(cx, cy);
+                drawingPoints.push({ x: mapPos.x, y: mapPos.y });
+                render();
+            } else {
+                // Check if clicked on a robot
+                const mapPos = canvasToMap(cx, cy);
+                let clickedRobot = null;
+
+                Object.values(robots).forEach(robot => {
+                    const wp = waypoints[robot.location];
+                    if (wp) {
+                        const dx = wp.position.x - mapPos.x;
+                        const dy = wp.position.y - mapPos.y;
+                        if (Math.sqrt(dx*dx + dy*dy) < 5) {
+                            clickedRobot = robot;
+                        }
+                    }
+                });
+
+                if (clickedRobot) {
+                    selectRobot(clickedRobot.robot_id);
+                }
+            }
+        });
+
+        canvas.addEventListener('dblclick', () => {
+            if (drawingMode && drawingPoints.length >= 3) {
+                completeZone();
+            }
+        });
+
+        // Zone drawing
+        function startDrawingZone(type) {
+            drawingMode = type;
+            drawingPoints = [];
+            document.getElementById('drawing-indicator').classList.add('active');
+            document.getElementById('cancel-btn').style.display = 'block';
+        }
+
+        function cancelDrawing() {
+            drawingMode = null;
+            drawingPoints = [];
+            document.getElementById('drawing-indicator').classList.remove('active');
+            document.getElementById('cancel-btn').style.display = 'none';
+            render();
+        }
+
+        async function completeZone() {
+            if (drawingPoints.length < 3) return;
+
+            const name = prompt('Enter zone name:', `${drawingMode} zone`);
+            if (!name) {
+                cancelDrawing();
+                return;
+            }
+
+            const reason = drawingMode === 'blocked' ?
+                prompt('Reason for blocking (optional):', '') : '';
+
+            try {
+                const response = await fetch('/map/zones', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name: name,
+                        floor_id: currentFloor,
+                        zone_type: drawingMode,
+                        polygon: drawingPoints,
+                        reason: reason
+                    })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    await loadZones();
+                } else {
+                    alert('Failed to create zone: ' + data.error);
+                }
+            } catch (error) {
+                alert('Error creating zone: ' + error.message);
+            }
+
+            cancelDrawing();
+        }
+
+        // Data loading
+        async function loadFloors() {
+            try {
+                const response = await fetch('/map/floors');
+                const data = await response.json();
+
+                if (data.success && data.floors.length > 0) {
+                    const select = document.getElementById('floor-select');
+                    select.innerHTML = data.floors.map(f =>
+                        `<option value="${f.id}">${f.name}</option>`
+                    ).join('');
+                }
+            } catch (error) {
+                console.error('Error loading floors:', error);
+            }
+        }
+
+        async function loadFloorData() {
+            try {
+                const response = await fetch(`/map/floors/${currentFloor}`);
+                const data = await response.json();
+
+                if (data.success) {
+                    mapWidth = data.floor.width || 100;
+                    mapHeight = data.floor.height || 80;
+                    waypoints = data.floor.waypoints || {};
+                    render();
+                }
+            } catch (error) {
+                console.error('Error loading floor data:', error);
+            }
+        }
+
+        async function loadRobots() {
+            try {
+                const response = await fetch('/robots');
+                const data = await response.json();
+
+                if (data.success) {
+                    robots = {};
+                    data.robots.forEach(r => {
+                        robots[r.robot_id] = r;
+                    });
+
+                    updateRobotList();
+                    document.getElementById('robot-count').textContent = data.count;
+                    render();
+                }
+            } catch (error) {
+                console.error('Error loading robots:', error);
+            }
+        }
+
+        async function loadZones() {
+            try {
+                const response = await fetch(`/map/zones?floor_id=${currentFloor}`);
+                const data = await response.json();
+
+                if (data.success) {
+                    zones = data.zones;
+                    updateZoneList();
+                    render();
+                }
+            } catch (error) {
+                console.error('Error loading zones:', error);
+            }
+        }
+
+        function updateRobotList() {
+            const container = document.getElementById('robot-list-container');
+            const robotArray = Object.values(robots);
+
+            if (robotArray.length === 0) {
+                container.innerHTML = '<div style="color: #9ca3af; font-size: 0.875rem;">No robots connected</div>';
+                return;
+            }
+
+            container.innerHTML = robotArray.map(robot => `
+                <div class="robot-item ${selectedRobot === robot.robot_id ? 'selected' : ''}"
+                     onclick="selectRobot('${robot.robot_id}')">
+                    <span class="robot-dot ${robot.status === 'navigating' ? 'navigating' : robot.status === 'offline' ? 'offline' : ''}"></span>
+                    <span class="robot-name">${robot.robot_id}</span>
+                    <span class="robot-battery">${robot.battery || '--'}%</span>
+                </div>
+            `).join('');
+        }
+
+        function updateZoneList() {
+            const container = document.getElementById('zone-list-container');
+
+            if (zones.length === 0) {
+                container.innerHTML = '<div style="color: #9ca3af; font-size: 0.875rem;">No active zones</div>';
+                return;
+            }
+
+            container.innerHTML = zones.map(zone => `
+                <div class="zone-item ${zone.zone_type}">
+                    <span>${zone.name}</span>
+                    <button class="zone-delete" onclick="deleteZone('${zone.id}')">&times;</button>
+                </div>
+            `).join('');
+        }
+
+        async function deleteZone(zoneId) {
+            if (!confirm('Delete this zone?')) return;
+
+            try {
+                const response = await fetch(`/map/zones/${zoneId}`, { method: 'DELETE' });
+                const data = await response.json();
+
+                if (data.success) {
+                    await loadZones();
+                } else {
+                    alert('Failed to delete zone: ' + data.error);
+                }
+            } catch (error) {
+                alert('Error deleting zone: ' + error.message);
+            }
+        }
+
+        function selectRobot(robotId) {
+            selectedRobot = robotId;
+            const robot = robots[robotId];
+
+            if (robot) {
+                document.getElementById('selected-robot-name').textContent = robotId;
+                document.getElementById('info-status').textContent = robot.status || '--';
+                document.getElementById('info-battery').textContent = (robot.battery || '--') + '%';
+                document.getElementById('info-location').textContent = robot.location || '--';
+                document.getElementById('info-last-update').textContent =
+                    robot.last_seen ? new Date(robot.last_seen).toLocaleTimeString() : '--';
+                document.getElementById('diagnostics-link').href = `/diagnostics/${robotId}`;
+
+                document.getElementById('info-panel').classList.add('visible');
+            }
+
+            updateRobotList();
+            render();
+        }
+
+        function closeInfoPanel() {
+            selectedRobot = null;
+            document.getElementById('info-panel').classList.remove('visible');
+            updateRobotList();
+            render();
+        }
+
+        async function sendSelectedToLocation() {
+            if (!selectedRobot) return;
+            const destination = prompt('Enter destination waypoint:');
+            if (!destination) return;
+
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: `Send ${selectedRobot} to ${destination}`,
+                        user_id: 'map_page'
+                    })
+                });
+                const data = await response.json();
+                alert(data.response || 'Command sent');
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function recallSelected() {
+            if (!selectedRobot) return;
+            if (!confirm(`Recall ${selectedRobot} to charging?`)) return;
+
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: `Recall ${selectedRobot} to charging`,
+                        user_id: 'map_page'
+                    })
+                });
+                const data = await response.json();
+                alert(data.response || 'Command sent');
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        function changeFloor() {
+            currentFloor = document.getElementById('floor-select').value;
+            loadFloorData();
+            loadZones();
+        }
+
+        async function refresh() {
+            await Promise.all([loadRobots(), loadZones()]);
+            document.getElementById('update-status').textContent =
+                `Updated: ${new Date().toLocaleTimeString()}`;
+        }
+
+        // Initial load
+        async function init() {
+            await loadFloors();
+            await loadFloorData();
+            await loadRobots();
+            await loadZones();
+        }
+
+        init();
+
+        // Auto-refresh every 3 seconds
+        setInterval(refresh, 3000);
+    </script>
+</body>
+</html>

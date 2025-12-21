@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Robot Diagnostics - WayfindR</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='css/base.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='css/header.css') }}">
+    <style>
+        .diagnostics-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 1rem;
+        }
+
+        .robot-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: #1a1a2e;
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+        }
+
+        .robot-info {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+        }
+
+        .robot-avatar {
+            width: 80px;
+            height: 80px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2rem;
+        }
+
+        .robot-name {
+            font-size: 1.5rem;
+            font-weight: bold;
+            margin: 0;
+        }
+
+        .robot-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #4ade80;
+        }
+
+        .status-dot.offline { background: #ef4444; }
+        .status-dot.navigating { background: #f59e0b; animation: pulse 1s infinite; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .robot-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .action-btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .action-btn.primary { background: #3b82f6; color: white; }
+        .action-btn.secondary { background: #374151; color: white; }
+        .action-btn.danger { background: #ef4444; color: white; }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .metric-card {
+            background: #1a1a2e;
+            padding: 1rem;
+            border-radius: 8px;
+        }
+
+        .metric-label {
+            color: #9ca3af;
+            font-size: 0.875rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .metric-value {
+            font-size: 1.5rem;
+            font-weight: bold;
+        }
+
+        .metric-value.good { color: #4ade80; }
+        .metric-value.warning { color: #f59e0b; }
+        .metric-value.danger { color: #ef4444; }
+
+        .section {
+            background: #1a1a2e;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            overflow: hidden;
+        }
+
+        .section-header {
+            background: #16162a;
+            padding: 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+        }
+
+        .section-header h3 {
+            margin: 0;
+            font-size: 1rem;
+        }
+
+        .section-content {
+            padding: 1rem;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .history-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.75rem;
+            background: #16162a;
+            border-radius: 4px;
+            margin-bottom: 0.5rem;
+        }
+
+        .history-item:last-child { margin-bottom: 0; }
+
+        .history-time {
+            color: #9ca3af;
+            font-size: 0.875rem;
+        }
+
+        .conversation-item {
+            padding: 0.75rem;
+            border-radius: 4px;
+            margin-bottom: 0.5rem;
+        }
+
+        .conversation-item.user {
+            background: #3b82f6;
+            margin-left: 20%;
+        }
+
+        .conversation-item.robot {
+            background: #374151;
+            margin-right: 20%;
+        }
+
+        .sensor-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 0.5rem;
+        }
+
+        .sensor-item {
+            background: #16162a;
+            padding: 0.75rem;
+            border-radius: 4px;
+            text-align: center;
+        }
+
+        .sensor-name {
+            font-size: 0.75rem;
+            color: #9ca3af;
+        }
+
+        .sensor-value {
+            font-size: 1.25rem;
+            font-weight: bold;
+        }
+
+        .path-info {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .path-point {
+            background: #374151;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+        }
+
+        .path-arrow {
+            color: #9ca3af;
+        }
+
+        .back-link {
+            color: #3b82f6;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .refresh-info {
+            color: #9ca3af;
+            font-size: 0.875rem;
+        }
+
+        .no-data {
+            color: #9ca3af;
+            text-align: center;
+            padding: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <div style="display: flex; align-items: center; gap: 2rem;">
+            <h1>Robot Diagnostics</h1>
+        </div>
+        <div class="refresh-info">
+            <span id="last-update">Last update: --</span>
+            <button onclick="refreshData()" class="action-btn secondary">Refresh</button>
+        </div>
+    </div>
+
+    <div class="diagnostics-container">
+        <a href="/" class="back-link">&larr; Back to Dashboard</a>
+
+        <!-- Robot Header -->
+        <div class="robot-header">
+            <div class="robot-info">
+                <div class="robot-avatar" id="robot-avatar">R</div>
+                <div>
+                    <h2 class="robot-name" id="robot-name">Loading...</h2>
+                    <div class="robot-status">
+                        <span class="status-dot" id="status-dot"></span>
+                        <span id="status-text">Checking...</span>
+                    </div>
+                </div>
+            </div>
+            <div class="robot-actions">
+                <button class="action-btn primary" onclick="sendToLocation()">Send To Location</button>
+                <button class="action-btn secondary" onclick="makeAnnouncement()">Make Announcement</button>
+                <button class="action-btn danger" onclick="recallRobot()">Recall to Charging</button>
+            </div>
+        </div>
+
+        <!-- Metrics Grid -->
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-label">Battery Level</div>
+                <div class="metric-value" id="battery-value">--%</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Current Location</div>
+                <div class="metric-value" id="location-value">--</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Destination</div>
+                <div class="metric-value" id="destination-value">--</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Floor</div>
+                <div class="metric-value" id="floor-value">--</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Uptime</div>
+                <div class="metric-value" id="uptime-value">--</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Last Telemetry</div>
+                <div class="metric-value" id="telemetry-age">--</div>
+            </div>
+        </div>
+
+        <!-- Current Path -->
+        <div class="section">
+            <div class="section-header">
+                <h3>Current Path</h3>
+            </div>
+            <div class="section-content" id="path-section">
+                <div class="no-data">No active navigation</div>
+            </div>
+        </div>
+
+        <!-- Sensor Data -->
+        <div class="section">
+            <div class="section-header">
+                <h3>Sensor Data</h3>
+            </div>
+            <div class="section-content">
+                <div class="sensor-grid" id="sensor-grid">
+                    <div class="sensor-item">
+                        <div class="sensor-name">IMU - Pitch</div>
+                        <div class="sensor-value" id="sensor-pitch">--</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-name">IMU - Roll</div>
+                        <div class="sensor-value" id="sensor-roll">--</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-name">IMU - Yaw</div>
+                        <div class="sensor-value" id="sensor-yaw">--</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-name">LiDAR - Front</div>
+                        <div class="sensor-value" id="sensor-lidar-front">--</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-name">LiDAR - Left</div>
+                        <div class="sensor-value" id="sensor-lidar-left">--</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-name">LiDAR - Right</div>
+                        <div class="sensor-value" id="sensor-lidar-right">--</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-name">Temperature</div>
+                        <div class="sensor-value" id="sensor-temp">--</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-name">Motor Left</div>
+                        <div class="sensor-value" id="sensor-motor-left">--</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-name">Motor Right</div>
+                        <div class="sensor-value" id="sensor-motor-right">--</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Telemetry History -->
+        <div class="section">
+            <div class="section-header">
+                <h3>Recent Telemetry</h3>
+            </div>
+            <div class="section-content" id="telemetry-history">
+                <div class="no-data">Loading...</div>
+            </div>
+        </div>
+
+        <!-- Conversation History -->
+        <div class="section">
+            <div class="section-header">
+                <h3>Recent Conversations</h3>
+            </div>
+            <div class="section-content" id="conversation-history">
+                <div class="no-data">No recent conversations</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Get robot ID from URL
+        const pathParts = window.location.pathname.split('/');
+        const robotId = pathParts[pathParts.length - 2] || 'robot_01';
+
+        // Update page with robot ID
+        document.getElementById('robot-name').textContent = robotId;
+        document.getElementById('robot-avatar').textContent = robotId.replace('robot_', 'R');
+
+        async function refreshData() {
+            try {
+                // Fetch robot details
+                const response = await fetch(`/robots/${robotId}`);
+                const data = await response.json();
+
+                if (data.success) {
+                    updateDisplay(data);
+                } else {
+                    console.error('Failed to fetch robot data:', data.error);
+                }
+
+                // Update timestamp
+                document.getElementById('last-update').textContent =
+                    `Last update: ${new Date().toLocaleTimeString()}`;
+
+            } catch (error) {
+                console.error('Error refreshing data:', error);
+            }
+        }
+
+        function updateDisplay(data) {
+            const current = data.current || {};
+
+            // Update status
+            const statusDot = document.getElementById('status-dot');
+            const statusText = document.getElementById('status-text');
+            const status = current.status || 'unknown';
+
+            statusDot.className = 'status-dot';
+            if (status === 'navigating') statusDot.classList.add('navigating');
+            else if (status === 'offline' || status === 'unknown') statusDot.classList.add('offline');
+
+            statusText.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+
+            // Update metrics
+            const battery = current.battery;
+            const batteryEl = document.getElementById('battery-value');
+            batteryEl.textContent = battery !== 'N/A' ? `${battery}%` : '--';
+            batteryEl.className = 'metric-value';
+            if (battery !== 'N/A') {
+                if (battery < 20) batteryEl.classList.add('danger');
+                else if (battery < 50) batteryEl.classList.add('warning');
+                else batteryEl.classList.add('good');
+            }
+
+            document.getElementById('location-value').textContent =
+                current.location || '--';
+            document.getElementById('destination-value').textContent =
+                current.destination || 'None';
+
+            // Update telemetry history
+            if (data.recent_history && data.recent_history.length > 0) {
+                const historyHtml = data.recent_history.map(item => `
+                    <div class="history-item">
+                        <div>
+                            <strong>${item.status || 'unknown'}</strong>
+                            at ${item.current_location || 'unknown'}
+                            (Battery: ${item.battery || '--'}%)
+                        </div>
+                        <div class="history-time">${formatTime(item.timestamp)}</div>
+                    </div>
+                `).join('');
+                document.getElementById('telemetry-history').innerHTML = historyHtml;
+            }
+
+            // Update sensor data if available
+            if (current.sensors) {
+                updateSensors(current.sensors);
+            }
+        }
+
+        function updateSensors(sensors) {
+            if (sensors.imu) {
+                document.getElementById('sensor-pitch').textContent =
+                    sensors.imu.pitch?.toFixed(1) || '--';
+                document.getElementById('sensor-roll').textContent =
+                    sensors.imu.roll?.toFixed(1) || '--';
+                document.getElementById('sensor-yaw').textContent =
+                    sensors.imu.yaw?.toFixed(1) || '--';
+            }
+            if (sensors.lidar) {
+                document.getElementById('sensor-lidar-front').textContent =
+                    sensors.lidar.front ? `${sensors.lidar.front}m` : '--';
+                document.getElementById('sensor-lidar-left').textContent =
+                    sensors.lidar.left ? `${sensors.lidar.left}m` : '--';
+                document.getElementById('sensor-lidar-right').textContent =
+                    sensors.lidar.right ? `${sensors.lidar.right}m` : '--';
+            }
+        }
+
+        function formatTime(isoString) {
+            if (!isoString) return '--';
+            try {
+                return new Date(isoString).toLocaleTimeString();
+            } catch {
+                return isoString;
+            }
+        }
+
+        async function sendToLocation() {
+            const destination = prompt('Enter destination waypoint:');
+            if (!destination) return;
+
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: `Send ${robotId} to ${destination}`,
+                        user_id: 'diagnostics_page'
+                    })
+                });
+                const data = await response.json();
+                alert(data.response || 'Command sent');
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function makeAnnouncement() {
+            const message = prompt('Enter announcement message:');
+            if (!message) return;
+
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: `Make ${robotId} announce "${message}"`,
+                        user_id: 'diagnostics_page'
+                    })
+                });
+                const data = await response.json();
+                alert(data.response || 'Command sent');
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        async function recallRobot() {
+            if (!confirm(`Recall ${robotId} to charging station?`)) return;
+
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: `Recall ${robotId} to charging`,
+                        user_id: 'diagnostics_page'
+                    })
+                });
+                const data = await response.json();
+                alert(data.response || 'Command sent');
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+
+        // Initial load
+        refreshData();
+
+        // Auto-refresh every 5 seconds
+        setInterval(refreshData, 5000);
+    </script>
+</body>
+</html>
