@@ -1,0 +1,181 @@
+/* Log Messages */
+.log-message {
+    background: white;
+    border-radius: 8px;
+    padding: 0.75rem;
+    margin-bottom: 0.6rem;
+    box-shadow: var(--shadow-sm);
+    border-left: 4px solid var(--primary-blue);
+    transition: all 0.2s ease;
+    animation: slideIn 0.3s ease-out;
+}
+
+.log-message:hover {
+    box-shadow: var(--shadow-md);
+    transform: translateX(4px);
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Log Role Styling */
+.log-message.user-log {
+    border-left-color: var(--primary-blue);
+}
+
+.log-message.ollama-log,
+.log-message.assistant-log {
+    border-left-color: var(--success-green);
+}
+
+.log-message.system-log {
+    border-left-color: var(--text-secondary);
+}
+
+/* Log Header */
+.log-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.log-header strong {
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.log-time {
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+}
+
+/* Log Body */
+.log-body {
+    color: var(--text-primary);
+    line-height: 1.5;
+    margin-bottom: 0.5rem;
+    word-wrap: break-word;
+    font-size: 0.85rem;
+}
+
+/* Robot Info */
+.robot-info {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0.5rem 0;
+    padding: 0.5rem;
+    background: linear-gradient(135deg, #E3F2FD 0%, #BBDEFB 100%);
+    border-radius: 6px;
+    border-left: 3px solid var(--primary-blue);
+}
+
+.robot-metric {
+    background: white;
+    color: var(--primary-blue-dark);
+    padding: 0.2rem 0.5rem;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    box-shadow: var(--shadow-sm);
+}
+
+/* Log Meta Information */
+.log-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    font-size: 0.75rem;
+}
+
+.log-meta span {
+    padding: 0.2rem 0.5rem;
+    border-radius: 12px;
+    font-weight: 500;
+}
+
+/* Status Badge */
+.log-status {
+    font-weight: 600;
+}
+
+.log-status.stuck {
+    background: #FFEBEE;
+    color: var(--danger-red);
+}
+
+.log-status.idle,
+.log-status.navigating {
+    background: #E8F5E9;
+    color: var(--success-green);
+}
+
+/* Battery Badge */
+.log-battery {
+    background: #E3F2FD;
+    color: var(--primary-blue);
+}
+
+.log-battery.low {
+    background: #FFEBEE;
+    color: var(--danger-red);
+}
+
+/* Location Badge */
+.log-location {
+    background: #FFF3E0;
+    color: var(--warning-orange);
+}
+
+/* Log ID Badge */
+.log-id {
+    background: #F3E5F5;
+    color: #7B1FA2;
+    font-family: 'Courier New', monospace;
+    font-size: 0.65rem;
+}
+
+/* Count Badge - Shows limit indicator */
+.count-badge.at-limit {
+    background: rgba(255, 152, 0, 0.2);
+    color: var(--warning-orange);
+    animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+/* Loading Indicator */
+.loading-indicator {
+    text-align: center;
+    padding: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.loading-indicator.error {
+    color: var(--danger-red);
+}
+
+/* Responsive */
+@media (max-width: 1200px) {
+    .log-meta {
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+}

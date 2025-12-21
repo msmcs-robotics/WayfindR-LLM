@@ -1,0 +1,80 @@
+/* Header Styles */
+#header {
+    background: var(--bg-white);
+    padding: 1rem 1.5rem;
+    box-shadow: var(--shadow-md);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+#header h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 0.5rem;
+}
+
+/* Status Bar */
+#status-bar {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+}
+
+.status-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.8rem;
+    background: var(--bg-light);
+    border-radius: 20px;
+    font-size: 0.8rem;
+}
+
+.status-label {
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.status-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+    transition: background-color 0.3s ease;
+}
+
+.status-indicator.online {
+    background: var(--success-green);
+    box-shadow: 0 0 8px var(--success-green);
+    animation: pulse 2s infinite;
+}
+
+.status-indicator.offline {
+    background: var(--danger-red);
+}
+
+#pg-status-text,
+#qdrant-status-text,
+#robot-status-text,
+#llm-status-text {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+/* Responsive Header */
+@media (max-width: 768px) {
+    #header h1 {
+        font-size: 1.25rem;
+    }
+
+    #status-bar {
+        gap: 0.75rem;
+    }
+
+    .status-item {
+        font-size: 0.7rem;
+        padding: 0.3rem 0.6rem;
+    }
+}

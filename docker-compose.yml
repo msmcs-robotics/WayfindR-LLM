@@ -1,15 +1,15 @@
 services:
   postgres:
-    image: postgres:latest
-    container_name: rag_pg
+    image: ankane/pgvector:latest
+    container_name: wayfind_pg
     environment:
-      POSTGRES_DB: rag_db
+      POSTGRES_DB: wayfind_db
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
     ports:
-      - "5432:5432"
+      - "5435:5432"
     volumes:
-      - ./pg_data:/var/lib/postgresql/data
+      - ./pgdata:/var/lib/postgresql/data
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -19,7 +19,7 @@ services:
 
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: rag_qdrant
+    container_name: wayfind_qdrant
     ports:
       - "6333:6333"  # REST API
       - "6334:6334"  # gRPC API
@@ -33,5 +33,5 @@ services:
       retries: 5
 
 volumes:
-  pg_data:
+  pgdata:
   qdrant_data:

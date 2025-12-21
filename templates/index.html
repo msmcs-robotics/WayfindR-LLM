@@ -3,40 +3,117 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hybrid RAG Chat System</title>
-    <link rel="stylesheet" href="/static/css/style.css">
+    <title>WayfindR Tour Guide Dashboard</title>
+
+    <!-- CSS Files -->
+    <link rel="stylesheet" href="{{ url_for('static', path='css/base.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='css/header.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='css/columns.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='css/logs.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', path='css/chat.css') }}">
 </head>
 <body>
-    <div id="main-container">
-        <!-- Left side: Qdrant Feed -->
-        <div id="qdrant-feed" class="feed-panel">
-            <h2>QDRANT Feed</h2>
-            <div id="qdrant-container" class="log-container"></div>
-            <div id="qdrant-loading" class="loading"></div>
+    <!-- Header with System Status -->
+    <div id="header">
+        <div style="display: flex; align-items: center; gap: 2rem;">
+            <h1>WayfindR Tour Guide Dashboard</h1>
         </div>
-
-        <!-- Middle: PostgreSQL Feed -->
-        <div id="postgres-feed" class="feed-panel">
-            <h2>PostgreSQL Feed</h2>
-            <div id="postgres-container" class="log-container"></div>
-            <div id="postgres-loading" class="loading"></div>
-        </div>
-
-        <!-- Right side: Chat Container -->
-        <div id="chat-container">
-            <h2>User Chat</h2>
-            <div id="chat-chat-container"></div>
-            <div id="form-container">
-                <form id="message-form">
-                    <input type="text" id="message-input" placeholder="Type your message..." required>
-                    <button type="submit">Send</button>
-                    <button type="button" id="health-button">Check Health</button>
-                </form>
-            </div>
-            <div id="health-status" style="margin-top: 5px;"></div>
+        <div id="status-bar">
+            <span class="status-item">
+                <span class="status-label">PostgreSQL:</span>
+                <span id="pg-status" class="status-indicator offline"></span>
+                <span id="pg-status-text">Checking...</span>
+            </span>
+            <span class="status-item">
+                <span class="status-label">Qdrant:</span>
+                <span id="qdrant-status" class="status-indicator offline"></span>
+                <span id="qdrant-status-text">Checking...</span>
+            </span>
+            <span class="status-item">
+                <span class="status-label">Robots:</span>
+                <span id="robot-status" class="status-indicator offline"></span>
+                <span id="robot-status-text">Checking...</span>
+            </span>
+            <span class="status-item">
+                <span class="status-label">LLM (Ollama):</span>
+                <span id="llm-status" class="status-indicator offline"></span>
+                <span id="llm-status-text">Checking...</span>
+            </span>
         </div>
     </div>
 
-    <script src="/static/js/script.js"></script>
+    <!-- Main 3-Column Layout -->
+    <div id="main-container">
+        <!-- Left Column: PostgreSQL Feed -->
+        <div class="data-column" id="postgresql-column">
+            <div class="column-header">
+                <h2>PostgreSQL Messages</h2>
+                <div class="column-controls">
+                    <button id="pg-stream-toggle" class="stream-toggle-btn">
+                        <span class="stream-icon">Start Live</span>
+                    </button>
+                    <span id="pg-count" class="count-badge">0</span>
+                </div>
+            </div>
+            <div id="postgresql-container" class="data-container">
+                <div class="empty-state">Waiting for data...</div>
+            </div>
+            <div id="pg-loading" class="loading-indicator">Ready to stream</div>
+        </div>
+
+        <!-- Middle Column: Qdrant Feed -->
+        <div class="data-column" id="qdrant-column">
+            <div class="column-header">
+                <h2>Robot Telemetry</h2>
+                <div class="column-controls">
+                    <button id="qdrant-stream-toggle" class="stream-toggle-btn">
+                        <span class="stream-icon">Start Live</span>
+                    </button>
+                    <span id="qdrant-count" class="count-badge">0</span>
+                </div>
+            </div>
+            <div id="qdrant-container" class="data-container">
+                <div class="empty-state">Waiting for telemetry...</div>
+            </div>
+            <div id="qdrant-loading" class="loading-indicator">Ready to stream</div>
+        </div>
+
+        <!-- Right Column: Chat Interface -->
+        <div class="data-column" id="chat-column">
+            <div class="column-header">
+                <h2>Tour Guide Chat</h2>
+                <div class="column-controls">
+                    <button id="clear-chat" class="control-btn">Clear</button>
+                </div>
+            </div>
+            <div id="chat-container" class="data-container">
+                <div class="welcome-message">
+                    <h3>Welcome to WayfindR</h3>
+                    <p>I'm your tour guide assistant. Try asking:</p>
+                    <ul>
+                        <li>"Take me to the cafeteria"</li>
+                        <li>"Where is the conference hall?"</li>
+                        <li>"What is the robot's status?"</li>
+                        <li>"Help, I'm lost"</li>
+                    </ul>
+                </div>
+            </div>
+            <form id="message-form">
+                <input type="text" id="message-input"
+                       placeholder="Ask me anything about the building..."
+                       required autocomplete="off">
+                <button type="submit">Send</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- JavaScript Files -->
+    <script src="{{ url_for('static', path='js/utils.js') }}"></script>
+    <script src="{{ url_for('static', path='js/state.js') }}"></script>
+    <script src="{{ url_for('static', path='js/health.js') }}"></script>
+    <script src="{{ url_for('static', path='js/logs.js') }}"></script>
+    <script src="{{ url_for('static', path='js/streaming.js') }}"></script>
+    <script src="{{ url_for('static', path='js/chat.js') }}"></script>
+    <script src="{{ url_for('static', path='js/main.js') }}"></script>
 </body>
 </html>
