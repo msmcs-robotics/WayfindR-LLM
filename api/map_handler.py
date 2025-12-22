@@ -463,6 +463,100 @@ async def get_map_state_for_robot(robot_id: str, floor_id: str = None) -> Dict[s
         return {"success": False, "error": str(e)}
 
 
+# =============================================================================
+# MAP IMAGE CONFIGURATION
+# =============================================================================
+
+async def get_map_image_config(map_name: str = "first_map") -> Dict[str, Any]:
+    """
+    Get the map image configuration for displaying in the browser
+
+    Returns:
+    - image_url: Path to the PNG map image
+    - resolution: Meters per pixel (from ROS2 map YAML)
+    - origin: [x, y, theta] origin in world coordinates
+    - dimensions: Pixel dimensions of the image
+    """
+    import os
+    import yaml
+
+    try:
+        # Look for map files in static/maps directory
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        maps_dir = os.path.join(base_path, "static", "maps")
+        yaml_path = os.path.join(maps_dir, f"{map_name}.yaml")
+        png_path = os.path.join(maps_dir, f"{map_name}.png")
+
+        if not os.path.exists(yaml_path):
+            return {"success": False, "error": f"Map '{map_name}' not found"}
+
+        # Read map YAML
+        with open(yaml_path, 'r') as f:
+            map_yaml = yaml.safe_load(f)
+
+        # Get image dimensions if PNG exists
+        width, height = 0, 0
+        if os.path.exists(png_path):
+            try:
+                from PIL import Image
+                with Image.open(png_path) as img:
+                    width, height = img.size
+            except ImportError:
+                # PIL not available, estimate from file
+                pass
+
+        return {
+            "success": True,
+            "map_name": map_name,
+            "image_url": f"/static/maps/{map_name}.png",
+            "resolution": map_yaml.get("resolution", 0.05),  # meters per pixel
+            "origin": map_yaml.get("origin", [0, 0, 0]),  # [x, y, theta] in meters
+            "occupied_thresh": map_yaml.get("occupied_thresh", 0.65),
+            "free_thresh": map_yaml.get("free_thresh", 0.25),
+            "negate": map_yaml.get("negate", 0),
+            "image_width": width,
+            "image_height": height
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+async def list_available_maps() -> Dict[str, Any]:
+    """List all available map files"""
+    import os
+    import glob
+
+    try:
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        maps_dir = os.path.join(base_path, "static", "maps")
+
+        if not os.path.exists(maps_dir):
+            return {"success": True, "maps": [], "count": 0}
+
+        # Find all YAML files (each YAML represents a map)
+        yaml_files = glob.glob(os.path.join(maps_dir, "*.yaml"))
+        maps = []
+
+        for yaml_file in yaml_files:
+            map_name = os.path.splitext(os.path.basename(yaml_file))[0]
+            png_exists = os.path.exists(os.path.join(maps_dir, f"{map_name}.png"))
+            maps.append({
+                "name": map_name,
+                "yaml_file": f"{map_name}.yaml",
+                "image_available": png_exists
+            })
+
+        return {
+            "success": True,
+            "maps": maps,
+            "count": len(maps)
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 __all__ = [
     'get_floors',
     'get_floor_details',
@@ -481,5 +575,7 @@ __all__ = [
     'delete_zone',
     'activate_zone',
     'deactivate_zone',
-    'get_map_state_for_robot'
+    'get_map_state_for_robot',
+    'get_map_image_config',
+    'list_available_maps'
 ]
