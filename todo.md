@@ -8,3 +8,39 @@ Does this all make sense and the remote system you should be able to use the lau
 so docker is installed on that system and should already be set up please don't use anything other than docker for that storage and then also please use a Python virtual environment to install packages in just to clarify
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Wait a second is sentence transformers being used for embedding all messages being streamed for telemetry or something? Because Cudrant should be storing all forms of telemetry being collected on the endpoints and I'll have to update what exactly telemetry is being collected so don't worry about this And then Ostgreql should be storing all kind of the relational data like all the messages between everything. Just to clarify I don't want to be removing any functionality right now I'm just was curious as to why sentence transformer was was even needed because Olama should be handling enough We should just really be pushing everything into rag itself.
+
+
+OK no I wanna be able to use semantic search but there should be an embedding model available through O Lama and already available on HPC system that I already polled. Would this make sense? 
+
+https://ollama.com/library/all-minilm:l6-v2
+
+Or is this not the same thing
+
+
+
+These are tasks that you have previously set up in the past and different conversations and I want you to make sure that they are all completed and if not then complete them.
+
+
+
+Update qdrant_store to use Ollama embeddings
+
+Update postgresql_store to use Ollama embeddings
+
+Add embedding model config to llm_config.py
+
+Rsync and test on remote system

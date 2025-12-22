@@ -3,15 +3,16 @@ Qdrant Store - Robot Telemetry Storage
 For WayfindR-LLM Tour Guide Robot System
 
 Handles time-series telemetry data (position, battery, sensors, status)
+Uses Ollama embeddings via HPC for semantic search capability.
 """
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
-from sentence_transformers import SentenceTransformer
+from qdrant_client.models import Distance, VectorParams, PointStruct, models
 import time
 import uuid
 from datetime import datetime
 from typing import Dict, List, Any, Optional
+import ollama
 
 # Import config
 try:
@@ -21,11 +22,73 @@ except ImportError:
     QDRANT_PORT = 6333
     TELEMETRY_COLLECTION = "robot_telemetry"
 
-VECTOR_DIM = 384  # MiniLM embedding size
+# Embedding model configuration
+# Uses Ollama through SSH tunnel to HPC
+OLLAMA_HOST = "http://localhost:11434"
+EMBEDDING_MODEL = "all-minilm:l6-v2"
+VECTOR_DIM = 384  # all-minilm:l6-v2 produces 384-dimensional embeddings
 
-# Initialize
-model = SentenceTransformer("all-MiniLM-L6-v2")
 qdrant_client = None
+ollama_client = None
+embeddings_available = False
+
+
+def _init_ollama():
+    """Initialize Ollama client for embeddings"""
+    global ollama_client, embeddings_available
+
+    try:
+        ollama_client = ollama.Client(host=OLLAMA_HOST)
+
+        # Test if embedding model is available
+        models_response = ollama_client.list()
+        model_names = [m.get('name', m.get('model', '')) for m in models_response.get('models', [])]
+
+        # Check if embedding model exists
+        model_found = any(EMBEDDING_MODEL in name or name.startswith('all-minilm') for name in model_names)
+
+        if model_found:
+            # Test embedding generation
+            test_embed = ollama_client.embeddings(model=EMBEDDING_MODEL, prompt="test")
+            if test_embed and 'embedding' in test_embed:
+                embeddings_available = True
+                print(f"[Qdrant] Ollama embeddings available ({EMBEDDING_MODEL})")
+                return True
+        else:
+            print(f"[Qdrant] Embedding model {EMBEDDING_MODEL} not found")
+            print(f"[Qdrant] Available models: {model_names}")
+            print(f"[Qdrant] To install: ollama pull {EMBEDDING_MODEL}")
+
+    except Exception as e:
+        print(f"[Qdrant] Ollama embeddings not available: {e}")
+        print(f"[Qdrant] Falling back to payload-only storage")
+
+    embeddings_available = False
+    return False
+
+
+def _get_embedding(text: str) -> List[float]:
+    """
+    Get embedding vector for text using Ollama
+
+    Falls back to dummy vector if Ollama is not available
+    """
+    global embeddings_available
+
+    if embeddings_available and ollama_client:
+        try:
+            response = ollama_client.embeddings(model=EMBEDDING_MODEL, prompt=text)
+            if response and 'embedding' in response:
+                return response['embedding']
+        except Exception as e:
+            print(f"[Qdrant] Embedding failed, using fallback: {e}")
+            # Don't disable embeddings for transient errors
+
+    # Fallback: create a simple hash-based vector
+    # This allows storage to work even without Ollama
+    import hashlib
+    hash_bytes = hashlib.sha384(text.encode()).digest()
+    return [float(b) / 255.0 for b in hash_bytes[:VECTOR_DIM]]
 
 
 def init_qdrant(retries=5, delay=2):
@@ -38,7 +101,14 @@ def init_qdrant(retries=5, delay=2):
 
             # Create Telemetry collection if not exists
             try:
-                qdrant_client.get_collection(TELEMETRY_COLLECTION)
+                collection_info = qdrant_client.get_collection(TELEMETRY_COLLECTION)
+                # Check if collection has correct vector size
+                current_size = collection_info.config.params.vectors.size
+                if current_size != VECTOR_DIM:
+                    print(f"[Qdrant] Collection vector size mismatch ({current_size} vs {VECTOR_DIM})")
+                    print(f"[Qdrant] Recreating collection...")
+                    qdrant_client.delete_collection(TELEMETRY_COLLECTION)
+                    raise Exception("Recreate collection")
                 print(f"[Qdrant] Connected to collection '{TELEMETRY_COLLECTION}'")
             except:
                 qdrant_client.create_collection(
@@ -46,6 +116,9 @@ def init_qdrant(retries=5, delay=2):
                     vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE)
                 )
                 print(f"[Qdrant] Created collection '{TELEMETRY_COLLECTION}'")
+
+            # Initialize Ollama for embeddings
+            _init_ollama()
 
             return True
 
@@ -95,18 +168,19 @@ def add_telemetry(robot_id: str, telemetry: Dict[str, Any]) -> Optional[str]:
         return None
 
     try:
-        # Create searchable text summary
+        # Extract key fields
         status = telemetry.get('status', 'unknown')
         battery = telemetry.get('battery', 0)
         location = telemetry.get('current_location', 'unknown')
         destination = telemetry.get('destination', '')
 
+        # Create searchable text summary
         text = f"Robot {robot_id} at {location} - Status: {status}, Battery: {battery}%"
         if destination:
             text += f", navigating to {destination}"
 
-        # Generate embedding
-        embedding = model.encode([text])[0].tolist()
+        # Generate embedding via Ollama
+        embedding = _get_embedding(text)
 
         # Create point ID
         point_id = str(uuid.uuid4())
@@ -114,7 +188,7 @@ def add_telemetry(robot_id: str, telemetry: Dict[str, Any]) -> Optional[str]:
         # Normalize timestamp
         timestamp = _normalize_timestamp(telemetry.get('timestamp', datetime.now()))
 
-        # Prepare payload
+        # Prepare payload (store all telemetry data)
         payload = {
             "robot_id": robot_id,
             "timestamp": timestamp,
@@ -144,6 +218,45 @@ def add_telemetry(robot_id: str, telemetry: Dict[str, Any]) -> Optional[str]:
         return None
 
 
+def search_telemetry(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Semantic search telemetry using Ollama embeddings
+
+    Examples:
+        - "robots with low battery" - finds robots with battery issues
+        - "stuck robots" - finds robots that are stuck
+        - "robots in lobby" - finds robots at specific location
+        - "navigating to cafeteria" - finds robots heading somewhere
+
+    Args:
+        query: Natural language search query
+        limit: Number of results
+
+    Returns:
+        List of matching telemetry records, ranked by relevance
+    """
+    if not qdrant_client:
+        return []
+
+    try:
+        # Generate query embedding
+        query_embedding = _get_embedding(query)
+
+        # Search by vector similarity
+        results = qdrant_client.search(
+            collection_name=TELEMETRY_COLLECTION,
+            query_vector=query_embedding,
+            limit=limit,
+            with_payload=True
+        )
+
+        return [hit.payload for hit in results]
+
+    except Exception as e:
+        print(f"[Qdrant] Error searching telemetry: {e}")
+        return []
+
+
 def get_robot_telemetry_history(robot_id: str, limit: int = 10) -> List[Dict[str, Any]]:
     """
     Get recent telemetry for a robot
@@ -162,14 +275,14 @@ def get_robot_telemetry_history(robot_id: str, limit: int = 10) -> List[Dict[str
     try:
         results = qdrant_client.scroll(
             collection_name=TELEMETRY_COLLECTION,
-            scroll_filter={
-                "must": [
-                    {
-                        "key": "robot_id",
-                        "match": {"value": robot_id}
-                    }
+            scroll_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="robot_id",
+                        match=models.MatchValue(value=robot_id)
+                    )
                 ]
-            },
+            ),
             limit=limit * 2,
             with_payload=True,
             with_vectors=False
@@ -244,9 +357,14 @@ def get_latest_telemetry(robot_id: str = None) -> Dict[str, Any]:
     try:
         scroll_filter = None
         if robot_id:
-            scroll_filter = {
-                "must": [{"key": "robot_id", "match": {"value": robot_id}}]
-            }
+            scroll_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="robot_id",
+                        match=models.MatchValue(value=robot_id)
+                    )
+                ]
+            )
 
         results = qdrant_client.scroll(
             collection_name=TELEMETRY_COLLECTION,
@@ -276,40 +394,88 @@ def get_latest_telemetry(robot_id: str = None) -> Dict[str, Any]:
         return {}
 
 
-def search_telemetry(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+def filter_telemetry(
+    robot_id: str = None,
+    status: str = None,
+    min_battery: int = None,
+    max_battery: int = None,
+    location: str = None,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
     """
-    Semantic search through telemetry data
+    Filter telemetry by various criteria (structured query)
 
     Args:
-        query: Search query (e.g., "robots with low battery")
-        limit: Number of results
+        robot_id: Filter by robot ID
+        status: Filter by status (idle, navigating, etc.)
+        min_battery: Minimum battery percentage
+        max_battery: Maximum battery percentage
+        location: Filter by location
+        limit: Max results
 
     Returns:
-        List of matching telemetry records with scores
+        List of matching telemetry records
     """
     if not qdrant_client:
         return []
 
     try:
-        query_vector = model.encode([query])[0].tolist()
+        conditions = []
 
-        results = qdrant_client.query_points(
+        if robot_id:
+            conditions.append(
+                models.FieldCondition(
+                    key="robot_id",
+                    match=models.MatchValue(value=robot_id)
+                )
+            )
+
+        if status:
+            conditions.append(
+                models.FieldCondition(
+                    key="status",
+                    match=models.MatchValue(value=status)
+                )
+            )
+
+        if location:
+            conditions.append(
+                models.FieldCondition(
+                    key="current_location",
+                    match=models.MatchValue(value=location)
+                )
+            )
+
+        if min_battery is not None:
+            conditions.append(
+                models.FieldCondition(
+                    key="battery",
+                    range=models.Range(gte=min_battery)
+                )
+            )
+
+        if max_battery is not None:
+            conditions.append(
+                models.FieldCondition(
+                    key="battery",
+                    range=models.Range(lte=max_battery)
+                )
+            )
+
+        scroll_filter = models.Filter(must=conditions) if conditions else None
+
+        results = qdrant_client.scroll(
             collection_name=TELEMETRY_COLLECTION,
-            query=query_vector,
+            scroll_filter=scroll_filter,
             limit=limit,
-            with_payload=True
-        )
+            with_payload=True,
+            with_vectors=False
+        )[0]
 
-        return [
-            {
-                **hit.payload,
-                'score': hit.score
-            }
-            for hit in results.points
-        ]
+        return [point.payload for point in results]
 
     except Exception as e:
-        print(f"[Qdrant] Error searching telemetry: {e}")
+        print(f"[Qdrant] Error filtering telemetry: {e}")
         return []
 
 
@@ -335,6 +501,8 @@ __all__ = [
     'get_robot_telemetry_history',
     'get_all_robots',
     'get_latest_telemetry',
+    'filter_telemetry',
     'search_telemetry',
-    'clear_collection'
+    'clear_collection',
+    'embeddings_available'
 ]

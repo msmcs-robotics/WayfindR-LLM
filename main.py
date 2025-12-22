@@ -42,7 +42,9 @@ from api.map_handler import (
     delete_zone,
     activate_zone,
     deactivate_zone,
-    get_map_state_for_robot
+    get_map_state_for_robot,
+    get_map_image_config,
+    list_available_maps
 )
 
 # Initialize LLM
@@ -435,6 +437,21 @@ async def get_robot_map_state(robot_id: str, floor_id: str = None):
     Returns accessible waypoints, blocked zones, etc.
     """
     return await get_map_state_for_robot(robot_id, floor_id)
+
+
+@app.get("/map/image/config")
+async def get_map_config(map_name: str = "first_map"):
+    """
+    Get map image configuration for browser display
+    Returns resolution, origin, and image URL
+    """
+    return await get_map_image_config(map_name)
+
+
+@app.get("/map/image/list")
+async def get_available_maps():
+    """List all available map files"""
+    return await list_available_maps()
 
 
 # =============================================================================
