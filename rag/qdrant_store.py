@@ -84,11 +84,16 @@ def _get_embedding(text: str) -> List[float]:
             print(f"[Qdrant] Embedding failed, using fallback: {e}")
             # Don't disable embeddings for transient errors
 
-    # Fallback: create a simple hash-based vector
+    # Fallback: create a deterministic pseudo-random vector from text hash
     # This allows storage to work even without Ollama
+    # Note: semantic search won't work well with hash-based vectors
     import hashlib
-    hash_bytes = hashlib.sha384(text.encode()).digest()
-    return [float(b) / 255.0 for b in hash_bytes[:VECTOR_DIM]]
+    vector = []
+    # Generate enough hash bytes by iterating with different salts
+    for i in range((VECTOR_DIM // 48) + 1):
+        hash_bytes = hashlib.sha384(f"{text}_{i}".encode()).digest()
+        vector.extend([float(b) / 255.0 for b in hash_bytes])
+    return vector[:VECTOR_DIM]
 
 
 def init_qdrant(retries=5, delay=2):

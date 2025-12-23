@@ -1,46 +1,134 @@
-OK great so this app is actually gonna work in conjunction with the Wayfinder driver app that you can see on the local system  ~/WayfindR-driver
+# WayfindR-LLM Todo List
 
-Now I want to start testing the LLM app on a remote system that you'll be able to connect to if you read connections.Md. And if you read through wayfinder driver you'll see that I'm just simply testing it on this remote system it's not a Raspberry Pi it's just a normal Ubuntu system and I've connected the lidar through the USB and have tried to start making maps. And you should be able to see where it's trying to make the map so I'd like to be able to test the live streaming or live viewing of the map in this LLM app because it's not like the map is gonna be updating All robots should be using the same maps to navigate and if I so choose I'll update like the master map or something so really this LLM app just shows this map live in the browser and then it collects telemetry from various robots to be able to plot where robots would be on the map does this all make sense? So this should allow you to be able to more thoroughly test the current app that you're developing and also I wanted to mention how are you gonna get all this code onto the remote system well if you use rsync and then the folder I want you to copy it to might already exist but it's gonna be on the remote system ~/Desktop/WayfindR-LLM
+Last Updated: 2025-12-22
 
-Does this all make sense and the remote system you should be able to use the launcho llama scripts just the same I should have my VPN up and running on that remote system so you can run everything just the same as if you were running on this system it's just you have better access to information over there.
+## Completed Tasks
 
+- [x] Update qdrant_store to use Ollama embeddings (all-minilm:l6-v2)
+- [x] Update postgresql_store to use Ollama embeddings
+- [x] Add embedding model config to llm_config.py
+- [x] Deploy and test on remote system (192.168.0.7)
+- [x] Remove sentence_transformers dependency (offload to HPC via Ollama)
+- [x] Add map image endpoints (/map/image/config, /map/image/list)
+- [x] Convert ROS2 SLAM PGM maps to PNG for web display
 
-so docker is installed on that system and should already be set up please don't use anything other than docker for that storage and then also please use a Python virtual environment to install packages in just to clarify
+---
 
+## High Priority
 
+### 1. Implement Missing API Endpoints
+The following endpoints returned 404 during testing:
+- [ ] `GET /floors` - List building floors
+- [ ] `GET /waypoints` - List available waypoints (currently only in config.py)
+- [ ] `GET /zones` - List restricted/blocked zones
+- [ ] `POST /zones` - Create new zones
+- [ ] `DELETE /zones/{zone_id}` - Remove zones
 
+### 2. Robot Position Plotting on Map
+- [ ] Implement coordinate-to-pixel conversion using map metadata:
+  - Resolution: 0.05 m/pixel
+  - Origin: [-4.88, -4.09, 0]
+  - Image size: 212x144 pixels
+- [ ] Create endpoint to get robot positions in pixel coordinates
+- [ ] Add frontend JavaScript to plot robot markers on map image
 
+### 3. Live Map Viewer
+- [ ] Create WebSocket endpoint for real-time telemetry updates
+- [ ] Build simple HTML/JS dashboard showing:
+  - Map with robot positions
+  - Robot status cards (battery, status, location)
+  - Recent activity log
+- [ ] Auto-refresh telemetry every 1-2 seconds
 
+---
 
+## Medium Priority
 
+### 4. Semantic Search API
+- [ ] Expose telemetry semantic search via API endpoint
+- [ ] Example: `GET /telemetry/search?q=robots with low battery`
+- [ ] Add message search: `GET /messages/search?q=navigation commands`
 
+### 5. LLM Integration Improvements
+- [ ] Test with active Ollama SSH tunnel
+- [ ] Add retry logic for LLM timeouts
+- [ ] Implement streaming responses for chat endpoints
+- [ ] Add context from conversation history to LLM prompts
 
+### 6. Telemetry Enhancements
+- [ ] Define complete telemetry schema for WayfindR-driver integration
+- [ ] Add sensor data fields (LiDAR, ultrasonic, etc.)
+- [ ] Implement telemetry retention/cleanup (older than 24h)
+- [ ] Add aggregation endpoints (avg battery by hour, etc.)
 
+---
 
+## Low Priority
 
+### 7. Zone Management
+- [ ] Visual zone editor on map
+- [ ] Zone types: blocked, slow, charging, tour-stop
+- [ ] Persist zones to database
+- [ ] Notify robots when entering/exiting zones
 
+### 8. Multi-Floor Support
+- [ ] Floor model with map per floor
+- [ ] Floor switching in UI
+- [ ] Elevator waypoints connecting floors
 
+### 9. Documentation
+- [ ] API documentation (OpenAPI/Swagger is available at /docs)
+- [ ] Deployment guide for remote systems
+- [ ] Integration guide for WayfindR-driver
 
+### 10. Testing & CI
+- [ ] Unit tests for RAG stores
+- [ ] Integration tests for API endpoints
+- [ ] Automated test runner script
 
-Wait a second is sentence transformers being used for embedding all messages being streamed for telemetry or something? Because Cudrant should be storing all forms of telemetry being collected on the endpoints and I'll have to update what exactly telemetry is being collected so don't worry about this And then Ostgreql should be storing all kind of the relational data like all the messages between everything. Just to clarify I don't want to be removing any functionality right now I'm just was curious as to why sentence transformer was was even needed because Olama should be handling enough We should just really be pushing everything into rag itself.
+---
 
+## Architecture Notes
 
-OK no I wanna be able to use semantic search but there should be an embedding model available through O Lama and already available on HPC system that I already polled. Would this make sense? 
+### Current Stack
+- **Backend**: FastAPI (Python 3.10)
+- **Telemetry Store**: Qdrant (vector DB with 384-dim embeddings)
+- **Message Store**: PostgreSQL (with optional pgvector)
+- **LLM**: Ollama on HPC (llama3.3:70b-instruct-q5_K_M)
+- **Embeddings**: Ollama all-minilm:l6-v2 (384 dimensions)
+- **Maps**: ROS2 SLAM (PGM + YAML, converted to PNG)
 
-https://ollama.com/library/all-minilm:l6-v2
+### Remote Deployment
+- Host: 192.168.0.7 (Ubuntu 22.04)
+- Docker: wayfind_qdrant, wayfind_pg
+- Venv: ~/Desktop/WayfindR-LLM/venv
+- Sync: `rsync -avz --exclude venv --exclude __pycache__ ...`
 
-Or is this not the same thing
+### Integration with WayfindR-driver
+- Driver app runs on robot (Raspberry Pi or test system)
+- Publishes telemetry to `/telemetry` endpoint
+- Receives commands via polling or future WebSocket
 
+---
 
+## Quick Commands
 
-These are tasks that you have previously set up in the past and different conversations and I want you to make sure that they are all completed and if not then complete them.
+```bash
+# Sync to remote
+rsync -avz --exclude '__pycache__' --exclude '.git' --exclude 'venv' \
+  /home/devel/WayfindR-LLM/ devel@192.168.0.7:~/Desktop/WayfindR-LLM/
 
+# Start server on remote
+ssh devel@192.168.0.7 "cd ~/Desktop/WayfindR-LLM && source venv/bin/activate && python main.py"
 
+# Check health
+curl http://192.168.0.7:5000/health
 
-Update qdrant_store to use Ollama embeddings
+# View API docs
+# Open: http://192.168.0.7:5000/docs
+```
 
-Update postgresql_store to use Ollama embeddings
+---
 
-Add embedding model config to llm_config.py
-
-Rsync and test on remote system
+## Test Results
+See [docs/tests/](docs/tests/) for detailed test reports.

@@ -12,10 +12,67 @@ LLM_MODEL = "llama3.3:70b-instruct-q5_K_M"
 CONNECTION_TIMEOUT = 30  # Increased for model loading
 MAX_RETRIES = 3
 
+# Embedding model for RAG semantic search
+# all-minilm:l6-v2 produces 384-dimensional embeddings
+# Used by qdrant_store.py and postgresql_store.py
+EMBEDDING_MODEL = "all-minilm:l6-v2"
+EMBEDDING_DIM = 384
+
 
 def get_ollama_client():
     """Get configured Ollama client"""
     return ollama.Client(host=OLLAMA_HOST)
+
+
+def get_embedding_model():
+    """Get the embedding model name"""
+    return EMBEDDING_MODEL
+
+
+def get_embedding(text: str, client=None) -> Optional[list]:
+    """
+    Get embedding vector for text using Ollama
+
+    Args:
+        text: Text to embed
+        client: Optional Ollama client (creates new one if not provided)
+
+    Returns:
+        384-dimensional embedding vector, or None if failed
+    """
+    if client is None:
+        client = get_ollama_client()
+
+    try:
+        response = client.embeddings(model=EMBEDDING_MODEL, prompt=text)
+        if response and 'embedding' in response:
+            return response['embedding']
+    except Exception as e:
+        print(f"[LLM] Embedding failed: {e}")
+
+    return None
+
+
+def test_embedding_model(client=None, verbose=True) -> bool:
+    """Test if embedding model is available"""
+    if client is None:
+        client = get_ollama_client()
+
+    try:
+        if verbose:
+            print(f"[LLM] Testing embedding model {EMBEDDING_MODEL}...")
+
+        response = client.embeddings(model=EMBEDDING_MODEL, prompt="test")
+        if response and 'embedding' in response:
+            if verbose:
+                print(f"[LLM] Embedding model available ({len(response['embedding'])} dimensions)")
+            return True
+    except Exception as e:
+        if verbose:
+            print(f"[LLM] Embedding model not available: {e}")
+            print(f"[LLM] To install: ollama pull {EMBEDDING_MODEL}")
+
+    return False
 
 
 def get_model_name():
