@@ -1,134 +1,216 @@
-# WayfindR-LLM Todo List
+# WayfindR-LLM Development Roadmap
 
 Last Updated: 2025-12-22
 
-## Completed Tasks
+## Latest Test Results
 
-- [x] Update qdrant_store to use Ollama embeddings (all-minilm:l6-v2)
-- [x] Update postgresql_store to use Ollama embeddings
-- [x] Add embedding model config to llm_config.py
-- [x] Deploy and test on remote system (192.168.0.7)
-- [x] Remove sentence_transformers dependency (offload to HPC via Ollama)
-- [x] Add map image endpoints (/map/image/config, /map/image/list)
-- [x] Convert ROS2 SLAM PGM maps to PNG for web display
+**Date:** December 22, 2025
+**Pass Rate:** 94.7% (18/19 tests passed)
+**Details:** [docs/tests/2025-12-22-comprehensive-test.md](docs/tests/2025-12-22-comprehensive-test.md)
 
----
-
-## High Priority
-
-### 1. Implement Missing API Endpoints
-The following endpoints returned 404 during testing:
-- [ ] `GET /floors` - List building floors
-- [ ] `GET /waypoints` - List available waypoints (currently only in config.py)
-- [ ] `GET /zones` - List restricted/blocked zones
-- [ ] `POST /zones` - Create new zones
-- [ ] `DELETE /zones/{zone_id}` - Remove zones
-
-### 2. Robot Position Plotting on Map
-- [ ] Implement coordinate-to-pixel conversion using map metadata:
-  - Resolution: 0.05 m/pixel
-  - Origin: [-4.88, -4.09, 0]
-  - Image size: 212x144 pixels
-- [ ] Create endpoint to get robot positions in pixel coordinates
-- [ ] Add frontend JavaScript to plot robot markers on map image
-
-### 3. Live Map Viewer
-- [ ] Create WebSocket endpoint for real-time telemetry updates
-- [ ] Build simple HTML/JS dashboard showing:
-  - Map with robot positions
-  - Robot status cards (battery, status, location)
-  - Recent activity log
-- [ ] Auto-refresh telemetry every 1-2 seconds
+| Category | Status |
+|----------|--------|
+| Health & System | All passing |
+| Telemetry Endpoints | All passing |
+| Robot Management | All passing |
+| Map Endpoints | 5/6 (map file expected missing) |
+| Chat Endpoints | All passing |
+| Semantic Search | All passing |
+| Data Retrieval | All passing |
 
 ---
 
-## Medium Priority
+## Completed Features
 
-### 4. Semantic Search API
-- [ ] Expose telemetry semantic search via API endpoint
-- [ ] Example: `GET /telemetry/search?q=robots with low battery`
-- [ ] Add message search: `GET /messages/search?q=navigation commands`
+### Core Infrastructure
+- [x] Ollama-based embeddings (all-minilm:l6-v2, 384 dimensions)
+- [x] PostgreSQL + Qdrant vector stores
+- [x] LLM integration (llama3.3:70b-instruct via Ollama)
+- [x] FastAPI server with automatic API docs
 
-### 5. LLM Integration Improvements
-- [ ] Test with active Ollama SSH tunnel
-- [ ] Add retry logic for LLM timeouts
-- [ ] Implement streaming responses for chat endpoints
-- [ ] Add context from conversation history to LLM prompts
-
-### 6. Telemetry Enhancements
-- [ ] Define complete telemetry schema for WayfindR-driver integration
-- [ ] Add sensor data fields (LiDAR, ultrasonic, etc.)
-- [ ] Implement telemetry retention/cleanup (older than 24h)
-- [ ] Add aggregation endpoints (avg battery by hour, etc.)
+### API Endpoints
+- [x] `/health` - System status check
+- [x] `/telemetry` - Robot telemetry ingestion
+- [x] `/telemetry/status` - Current robot status
+- [x] `/telemetry/history/{robot_id}` - Telemetry history
+- [x] `/telemetry/stats` - Collection statistics
+- [x] `/robots` - Robot fleet management
+- [x] `/map/floors`, `/map/waypoints`, `/map/zones` - Spatial data
+- [x] `/map/robots/positions` - Coordinate-to-pixel conversion
+- [x] `/map/image/*` - ROS2 SLAM map serving
+- [x] `/search/telemetry`, `/search/messages` - Semantic search
+- [x] `/chat`, `/robot_chat` - LLM-powered conversations
+- [x] `/ws/telemetry` - WebSocket real-time updates
+- [x] `/data/qdrant`, `/data/postgresql` - Raw data access
 
 ---
 
-## Low Priority
+## Priority 1: ROS2 Integration
 
-### 7. Zone Management
-- [ ] Visual zone editor on map
-- [ ] Zone types: blocked, slow, charging, tour-stop
-- [ ] Persist zones to database
-- [ ] Notify robots when entering/exiting zones
+The next phase is connecting to the actual WayfindR robot fleet.
 
-### 8. Multi-Floor Support
-- [ ] Floor model with map per floor
+### Robot Driver Integration
+- [ ] Define ROS2 telemetry message schema
+- [ ] Create ROS2 node that publishes to `/telemetry` endpoint
+- [ ] Test with actual robot coordinates
+- [ ] Verify LiDAR map coordinate system alignment
+
+### Map Configuration
+- [ ] Deploy actual SLAM maps (PGM/YAML) to `data/maps/`
+- [ ] Configure map origin, resolution in YAML files
+- [ ] Test coordinate-to-pixel conversion with real positions
+
+### Live Map Viewer
+- [ ] Connect map.html to `/ws/telemetry` WebSocket
+- [ ] Overlay robot icons at pixel positions
+- [ ] Add robot status indicators (battery, state)
+- [ ] Show movement trails
+
+---
+
+## Priority 2: Operational Features
+
+### Alert System
+- [ ] Low battery detection (<20% threshold)
+- [ ] Stuck robot detection (no movement for N minutes)
+- [ ] Zone violation alerts
+- [ ] WebSocket push to operator dashboard
+
+### Zone Management
+- [ ] Persist zones to `data/zones.json`
+- [ ] Auto-load zones on startup
+- [ ] Zone expiration/scheduling
+- [ ] Geo-fence enforcement
+
+### Telemetry Retention
+- [ ] Automatic cleanup of old data (configurable hours)
+- [ ] Scheduled cleanup task
+- [ ] Data export for analysis
+
+---
+
+## Priority 3: LLM Enhancements
+
+### Chat Improvements
+- [ ] Streaming responses (SSE)
+- [ ] Conversation memory (last N messages)
+- [ ] Per-robot system prompts
+- [ ] Intent classification for commands
+
+### RAG Improvements
+- [ ] Embed more context (zone definitions, waypoints)
+- [ ] Better search result ranking
+- [ ] Query expansion for better recall
+
+---
+
+## Priority 4: Multi-Floor & Scaling
+
+### Multi-Floor Support
+- [ ] Multiple floor map configurations
 - [ ] Floor switching in UI
-- [ ] Elevator waypoints connecting floors
+- [ ] Elevator waypoint connections
+- [ ] Cross-floor navigation context
 
-### 9. Documentation
-- [ ] API documentation (OpenAPI/Swagger is available at /docs)
-- [ ] Deployment guide for remote systems
-- [ ] Integration guide for WayfindR-driver
-
-### 10. Testing & CI
-- [ ] Unit tests for RAG stores
-- [ ] Integration tests for API endpoints
-- [ ] Automated test runner script
+### Performance
+- [ ] Load testing telemetry ingestion rate
+- [ ] Connection pooling for databases
+- [ ] Embedding batch processing
 
 ---
 
-## Architecture Notes
+## Architecture
 
-### Current Stack
-- **Backend**: FastAPI (Python 3.10)
-- **Telemetry Store**: Qdrant (vector DB with 384-dim embeddings)
-- **Message Store**: PostgreSQL (with optional pgvector)
-- **LLM**: Ollama on HPC (llama3.3:70b-instruct-q5_K_M)
-- **Embeddings**: Ollama all-minilm:l6-v2 (384 dimensions)
-- **Maps**: ROS2 SLAM (PGM + YAML, converted to PNG)
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    WayfindR-LLM Server                      │
+│                    (FastAPI on :5000)                       │
+├─────────────────────────────────────────────────────────────┤
+│  REST Endpoints:                                            │
+│  ├── /health              System status                     │
+│  ├── /chat                Operator chat (LLM)               │
+│  ├── /robot_chat          Visitor/robot chat (LLM)          │
+│  ├── /telemetry/*         Robot telemetry                   │
+│  ├── /robots/*            Fleet management                  │
+│  ├── /map/*               Floors, waypoints, zones, images  │
+│  ├── /search/*            Semantic search                   │
+│  └── /data/*              Raw data access                   │
+│                                                             │
+│  WebSocket:                                                 │
+│  └── /ws/telemetry        Real-time position updates        │
+├─────────────────────────────────────────────────────────────┤
+│  Storage:                                                   │
+│  ├── Qdrant (:6333)       Telemetry vectors (384d)          │
+│  └── PostgreSQL (:5435)   Messages, logs (pgvector)         │
+├─────────────────────────────────────────────────────────────┤
+│  AI/LLM (Ollama via tunnel):                                │
+│  ├── llama3.3:70b         Chat & commands                   │
+│  └── all-minilm:l6-v2     Embeddings                        │
+└─────────────────────────────────────────────────────────────┘
+           │
+           │ HTTP/WebSocket
+           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    WayfindR Robot Fleet                     │
+│                    (ROS2 Humble)                            │
+├─────────────────────────────────────────────────────────────┤
+│  Each robot publishes:                                      │
+│  ├── Position (x, y, theta)                                 │
+│  ├── Battery level                                          │
+│  ├── Navigation status                                      │
+│  └── Current location name                                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Quick Reference
+
+### Local Development
+```bash
+# Activate environment
+cd /home/devel/WayfindR-LLM
+source venv/bin/activate
+
+# Start server
+python main.py
+
+# Run tests
+./scripts/run_tests.sh http://localhost:5000
+
+# View API docs
+# Open: http://localhost:5000/docs
+```
 
 ### Remote Deployment
-- Host: 192.168.0.7 (Ubuntu 22.04)
-- Docker: wayfind_qdrant, wayfind_pg
-- Venv: ~/Desktop/WayfindR-LLM/venv
-- Sync: `rsync -avz --exclude venv --exclude __pycache__ ...`
-
-### Integration with WayfindR-driver
-- Driver app runs on robot (Raspberry Pi or test system)
-- Publishes telemetry to `/telemetry` endpoint
-- Receives commands via polling or future WebSocket
-
----
-
-## Quick Commands
-
 ```bash
 # Sync to remote
 rsync -avz --exclude '__pycache__' --exclude '.git' --exclude 'venv' \
   /home/devel/WayfindR-LLM/ devel@192.168.0.7:~/Desktop/WayfindR-LLM/
 
-# Start server on remote
+# Start on remote
 ssh devel@192.168.0.7 "cd ~/Desktop/WayfindR-LLM && source venv/bin/activate && python main.py"
+```
 
-# Check health
-curl http://192.168.0.7:5000/health
+### Ollama Tunnel (for HPC LLM access)
+```bash
+ssh -L 11434:localhost:11434 hpc-cluster
+```
 
-# View API docs
-# Open: http://192.168.0.7:5000/docs
+### Database Containers
+```bash
+# Qdrant
+docker start rag_qdrant  # Port 6333
+
+# PostgreSQL
+docker start rag_pg      # Port 5435
 ```
 
 ---
 
-## Test Results
-See [docs/tests/](docs/tests/) for detailed test reports.
+## Notes
+
+- Embeddings are 384-dimensional via Ollama's all-minilm:l6-v2
+- All AI processing offloaded to HPC via SSH tunnel
+- Map coordinates use ROS2 standard: `pixel = (world - origin) / resolution`
+- WebSocket broadcasts on telemetry updates for real-time tracking

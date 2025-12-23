@@ -497,6 +497,112 @@ def clear_collection():
         print(f"[Qdrant] Error clearing collection: {e}")
 
 
+def cleanup_old_telemetry(hours: int = 24) -> int:
+    """
+    Remove telemetry older than specified hours
+
+    Args:
+        hours: Delete telemetry older than this many hours (default 24)
+
+    Returns:
+        Number of records deleted
+    """
+    if not qdrant_client:
+        return 0
+
+    try:
+        from datetime import timedelta
+
+        cutoff = datetime.now() - timedelta(hours=hours)
+        cutoff_iso = cutoff.isoformat()
+
+        # Get all points with old timestamps
+        results = qdrant_client.scroll(
+            collection_name=TELEMETRY_COLLECTION,
+            limit=10000,
+            with_payload=True,
+            with_vectors=False
+        )[0]
+
+        # Find IDs to delete
+        ids_to_delete = []
+        for point in results:
+            ts = point.payload.get('timestamp', '')
+            if ts and ts < cutoff_iso:
+                ids_to_delete.append(point.id)
+
+        if ids_to_delete:
+            qdrant_client.delete(
+                collection_name=TELEMETRY_COLLECTION,
+                points_selector=models.PointIdsList(points=ids_to_delete)
+            )
+            print(f"[Qdrant] Cleaned up {len(ids_to_delete)} old telemetry records")
+
+        return len(ids_to_delete)
+
+    except Exception as e:
+        print(f"[Qdrant] Error cleaning up telemetry: {e}")
+        return 0
+
+
+def get_telemetry_stats() -> Dict[str, Any]:
+    """
+    Get telemetry collection statistics
+
+    Returns:
+        Dictionary with count, oldest/newest timestamps, robots
+    """
+    if not qdrant_client:
+        return {"error": "Client not initialized"}
+
+    try:
+        # Get collection info
+        info = qdrant_client.get_collection(TELEMETRY_COLLECTION)
+        total_count = info.points_count
+
+        # Get sample of records to find stats
+        results = qdrant_client.scroll(
+            collection_name=TELEMETRY_COLLECTION,
+            limit=1000,
+            with_payload=True,
+            with_vectors=False
+        )[0]
+
+        if not results:
+            return {
+                "total_count": 0,
+                "robots": [],
+                "oldest": None,
+                "newest": None
+            }
+
+        # Gather stats
+        robots = set()
+        timestamps = []
+
+        for point in results:
+            rid = point.payload.get('robot_id')
+            if rid:
+                robots.add(rid)
+            ts = point.payload.get('timestamp')
+            if ts:
+                timestamps.append(ts)
+
+        timestamps.sort()
+
+        return {
+            "total_count": total_count,
+            "robots": list(robots),
+            "robot_count": len(robots),
+            "oldest": timestamps[0] if timestamps else None,
+            "newest": timestamps[-1] if timestamps else None,
+            "embeddings_available": embeddings_available
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # Initialize on import
 init_qdrant()
 
@@ -509,5 +615,7 @@ __all__ = [
     'filter_telemetry',
     'search_telemetry',
     'clear_collection',
+    'cleanup_old_telemetry',
+    'get_telemetry_stats',
     'embeddings_available'
 ]

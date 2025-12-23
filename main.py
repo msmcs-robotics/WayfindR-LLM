@@ -3,14 +3,17 @@
 WayfindR-LLM Main Application
 FastAPI server for tour guide robot system
 """
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
 import uvicorn
 import sys
+import asyncio
+import json
 from datetime import datetime
+from typing import List
 
 # Import configuration
 from core.config import SERVER_HOST, SERVER_PORT, SYSTEM_NAME
@@ -454,6 +457,150 @@ async def get_available_maps():
     return await list_available_maps()
 
 
+@app.get("/map/robots/positions")
+async def get_robot_positions_on_map(map_name: str = "first_map"):
+    """
+    Get all robot positions converted to pixel coordinates for map display
+
+    Returns robot positions in both world coordinates (meters) and pixel coordinates
+    """
+    try:
+        from rag.qdrant_store import get_latest_telemetry
+
+        # Get map config for coordinate conversion
+        map_config = await get_map_image_config(map_name)
+        if not map_config.get("success"):
+            return {"success": False, "error": "Map not found"}
+
+        resolution = map_config.get("resolution", 0.05)  # meters per pixel
+        origin = map_config.get("origin", [0, 0, 0])  # [x, y, theta] in meters
+        img_width = map_config.get("image_width", 0)
+        img_height = map_config.get("image_height", 0)
+
+        # Get all robot telemetry
+        all_telemetry = get_latest_telemetry()
+
+        robots = []
+        for robot_id, telemetry in all_telemetry.items():
+            # Get world coordinates
+            world_x = telemetry.get("x", 0)
+            world_y = telemetry.get("y", 0)
+
+            # Convert world coordinates to pixel coordinates
+            # Formula: pixel = (world - origin) / resolution
+            # Y axis is flipped in image coordinates
+            pixel_x = int((world_x - origin[0]) / resolution)
+            pixel_y = int(img_height - (world_y - origin[1]) / resolution)
+
+            robots.append({
+                "robot_id": robot_id,
+                "status": telemetry.get("status", "unknown"),
+                "battery": telemetry.get("battery", 0),
+                "location": telemetry.get("current_location", "unknown"),
+                "destination": telemetry.get("destination", ""),
+                "world_position": {"x": world_x, "y": world_y},
+                "pixel_position": {"x": pixel_x, "y": pixel_y},
+                "last_seen": telemetry.get("timestamp", "")
+            })
+
+        return {
+            "success": True,
+            "map_name": map_name,
+            "map_dimensions": {"width": img_width, "height": img_height},
+            "resolution": resolution,
+            "origin": origin,
+            "robots": robots,
+            "count": len(robots)
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# =============================================================================
+# SEMANTIC SEARCH ENDPOINTS
+# =============================================================================
+
+@app.get("/search/telemetry")
+async def search_telemetry(q: str, limit: int = 10):
+    """
+    Semantic search over robot telemetry
+
+    Examples:
+    - /search/telemetry?q=robots with low battery
+    - /search/telemetry?q=stuck robots
+    - /search/telemetry?q=robots in lobby
+    """
+    try:
+        from rag.qdrant_store import search_telemetry as qdrant_search
+        results = qdrant_search(q, limit=limit)
+        return {
+            "success": True,
+            "query": q,
+            "results": results,
+            "count": len(results)
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/search/messages")
+async def search_messages(q: str, limit: int = 10):
+    """
+    Semantic search over chat messages and logs
+
+    Examples:
+    - /search/messages?q=navigation commands
+    - /search/messages?q=error reports
+    - /search/messages?q=visitor questions about cafeteria
+    """
+    try:
+        from rag.postgresql_store import search_logs
+        results = search_logs(q, limit=limit)
+        return {
+            "success": True,
+            "query": q,
+            "results": results,
+            "count": len(results)
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# =============================================================================
+# TELEMETRY MANAGEMENT ENDPOINTS
+# =============================================================================
+
+@app.get("/telemetry/stats")
+async def get_telemetry_statistics():
+    """Get telemetry collection statistics"""
+    try:
+        from rag.qdrant_store import get_telemetry_stats
+        stats = get_telemetry_stats()
+        return {"success": True, **stats}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/telemetry/cleanup")
+async def cleanup_telemetry(hours: int = 24):
+    """
+    Clean up old telemetry data
+
+    Args:
+        hours: Delete telemetry older than this many hours (default 24)
+    """
+    try:
+        from rag.qdrant_store import cleanup_old_telemetry
+        deleted = cleanup_old_telemetry(hours=hours)
+        return {
+            "success": True,
+            "deleted_count": deleted,
+            "message": f"Deleted {deleted} telemetry records older than {hours} hours"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 # =============================================================================
 # STREAMING ENDPOINTS
 # =============================================================================
@@ -480,6 +627,105 @@ async def get_postgresql_data_endpoint():
 async def get_qdrant_data_endpoint():
     """Get Qdrant telemetry"""
     return await get_qdrant_data()
+
+
+# =============================================================================
+# WEBSOCKET ENDPOINTS
+# =============================================================================
+
+class ConnectionManager:
+    """Manages WebSocket connections for real-time updates"""
+
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        """Broadcast message to all connected clients"""
+        disconnected = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except:
+                disconnected.append(connection)
+
+        # Clean up disconnected clients
+        for conn in disconnected:
+            self.disconnect(conn)
+
+
+# Global connection manager
+ws_manager = ConnectionManager()
+
+
+@app.websocket("/ws/telemetry")
+async def websocket_telemetry(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time telemetry updates
+
+    Clients receive:
+    - Robot position updates
+    - Status changes
+    - Battery alerts
+    """
+    await ws_manager.connect(websocket)
+
+    try:
+        # Send initial data
+        from rag.qdrant_store import get_latest_telemetry
+        initial_data = get_latest_telemetry()
+        await websocket.send_json({
+            "type": "initial",
+            "robots": {rid: tel for rid, tel in initial_data.items()}
+        })
+
+        # Keep connection alive and send periodic updates
+        while True:
+            try:
+                # Wait for client ping or timeout
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=2.0)
+
+                # If client sends 'ping', respond with current data
+                if data == 'ping':
+                    current_data = get_latest_telemetry()
+                    await websocket.send_json({
+                        "type": "update",
+                        "robots": {rid: tel for rid, tel in current_data.items()},
+                        "timestamp": datetime.now().isoformat()
+                    })
+
+            except asyncio.TimeoutError:
+                # Send periodic updates even without ping
+                current_data = get_latest_telemetry()
+                await websocket.send_json({
+                    "type": "update",
+                    "robots": {rid: tel for rid, tel in current_data.items()},
+                    "timestamp": datetime.now().isoformat()
+                })
+
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+    except Exception as e:
+        print(f"[WS] Error: {e}")
+        ws_manager.disconnect(websocket)
+
+
+async def broadcast_telemetry_update(robot_id: str, telemetry: dict):
+    """Called when new telemetry is received to broadcast to all clients"""
+    if ws_manager.active_connections:
+        await ws_manager.broadcast({
+            "type": "robot_update",
+            "robot_id": robot_id,
+            "telemetry": telemetry,
+            "timestamp": datetime.now().isoformat()
+        })
 
 
 # =============================================================================

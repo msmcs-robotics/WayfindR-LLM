@@ -1,0 +1,88 @@
+INFO:     Started server process [202933]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:5000 (Press CTRL+C to quit)
+[PostgreSQL] Created table with vector support
+[PostgreSQL] Ollama embeddings available (all-minilm:l6-v2)
+[PostgreSQL] Database initialized successfully
+[Qdrant] Connected to collection 'robot_telemetry'
+[Qdrant] Ollama embeddings available (all-minilm:l6-v2)
+[MCP] Initializing LLM...
+[LLM] Testing connection to http://localhost:11434...
+[LLM] Connected successfully
+[LLM] Available models: ['llama3.1:70b', 'codestral:22b', 'all-minilm:l6-v2', 'deepseek-r1:7b', 'qwen3-coder:480b', 'qwen3-coder:30b', 'deepseek-r1:671b', 'qwen2.5-coder:32b', 'deepseek-r1:70b', 'deepseek-r1:8b', 'deepseek-coder-v2:16b', 'deepseek-coder-v2:236b', 'kimi-k2-thinking:cloud', 'qwen2.5-coder:7b', 'llama3:8b', 'gemma2:2b', 'nomic-embed-text:latest', 'llama3.3:70b-instruct-q5_K_M', 'llama3.2:3b-instruct-q5_K_M', 'llama3.2:1b-instruct-q4_K_M']
+[MCP] LLM configured: llama3.3:70b-instruct-q5_K_M (will load on first use)
+[RAG] Initializing storage...
+[RAG] PostgreSQL and Qdrant stores initialized
+============================================================
+Starting WayfindR Tour Guide Robot
+============================================================
+Python version: 3.10.12 (main, Nov  4 2025, 08:48:33) [GCC 11.4.0]
+Visit http://0.0.0.0:5000
+============================================================
+INFO:     127.0.0.1:45450 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37272 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56722 - "GET /health HTTP/1.1" 200 OK
+[TELEMETRY] Stored telemetry for test_bot: idle
+INFO:     127.0.0.1:56738 - "POST /telemetry HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56748 - "GET /telemetry/status?robot_id=test_bot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56752 - "GET /telemetry/history/test_bot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56760 - "GET /telemetry/stats HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56770 - "GET /robots HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56782 - "GET /robots/test_bot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56796 - "GET /map/floors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56810 - "GET /map/floors/floor_1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56820 - "GET /map/waypoints HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56826 - "GET /map/zones HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56832 - "GET /map/image/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56840 - "GET /map/robots/positions HTTP/1.1" 200 OK
+
+[CHAT] Web message: Show robot status...
+
+[OPERATOR] Processing command: Show robot status...
+
+[LLM] chat_with_retry() called
+[LLM]   Model: llama3.3:70b-instruct-q5_K_M
+[LLM]   Message count: 2
+[LLM] Attempt 1/2
+[LLM] Response received successfully
+[OPERATOR INTENT] Parsed: status_query - commands: [{'type': 'get_all_status'}]
+[OPERATOR] Intent: status_query - commands: [{'type': 'get_all_status'}]
+[OPERATOR CMD] Executing: get_all_status with: {'type': 'get_all_status'}
+[OPERATOR] Getting status for all robots
+[OPERATOR] Command result: {'success': True, 'total_robots': 2, 'robots': [{'robot_id': 'test_bot', 'status': 'idle', 'battery': 75, 'location': 'lobby', 'last_update': '2025-12-22T23:33:43.471291'}, {'robot_id': 'robot_alpha', 'status': 'idle', 'battery': 92, 'location': 'lobby', 'last_update': '2025-12-22T23:30:03.822938'}], 'message': 'Found 2 robot(s) in system'}
+
+[LLM] chat_with_retry() called
+[LLM]   Model: llama3.3:70b-instruct-q5_K_M
+[LLM]   Message count: 2
+[LLM] Attempt 1/2
+[LLM] Response received successfully
+INFO:     127.0.0.1:56852 - "POST /chat HTTP/1.1" 200 OK
+
+[CHAT] Robot test_bot message: Where is cafeteria?...
+
+[ROBOT] Processing visitor message: Where is cafeteria?...
+
+[LLM] chat_with_retry() called
+[LLM]   Model: llama3.3:70b-instruct-q5_K_M
+[LLM]   Message count: 2
+[LLM] Attempt 1/2
+[LLM] Response received successfully
+[INTENT] Parsed: navigation - waypoints: ['cafeteria']
+[ROBOT] Intent: navigation - waypoints: ['cafeteria']
+
+[LLM] chat_with_retry() called
+[LLM]   Model: llama3.3:70b-instruct-q5_K_M
+[LLM]   Message count: 2
+[LLM] Attempt 1/2
+[LLM] Response received successfully
+INFO:     127.0.0.1:57152 - "POST /robot_chat HTTP/1.1" 200 OK
+[Qdrant] Error searching telemetry: 'QdrantClient' object has no attribute 'search'
+INFO:     127.0.0.1:43462 - "GET /search/telemetry?q=robots HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43476 - "GET /search/messages?q=cafeteria HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43486 - "GET /data/qdrant HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43502 - "GET /data/postgresql HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [202933]
